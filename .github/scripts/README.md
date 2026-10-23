@@ -55,7 +55,8 @@ npm run tauri --workspace @ohmypassword/mobile -- ios build --ci --debug --targe
 ```
 
 The Android job installs JDK 17, SDK platform 36, build tools 36.0.0 and NDK
-27.2.12479018. The corresponding Rust targets are `aarch64-linux-android`
+27.2.12479018, using the Ubuntu runner's preinstalled `sdkmanager` after checking
+its path and accepting SDK licenses. The corresponding Rust targets are `aarch64-linux-android`
 and `aarch64-apple-ios-sim`. All Rust builds use committed lockfiles.
 
 CI uploads artifacts without publishing a Release. The APK uses a development
