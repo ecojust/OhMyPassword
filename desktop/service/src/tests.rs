@@ -129,6 +129,74 @@ fn browser_bridge_requires_exact_origin_token_host_and_unlocked_vault() {
             .unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.headers()["cache-control"], "no-store");
+        let post_search = format!("{base}/v1/credentials/search");
+        let query = serde_json::json!({"hostname":"example.com"});
+        let r = c
+            .request(reqwest::Method::OPTIONS, &post_search)
+            .header("Origin", ORIGIN)
+            .header("Access-Control-Request-Method", "POST")
+            .header(
+                "Access-Control-Request-Headers",
+                "Authorization, Content-Type",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        assert_eq!(r.headers()["access-control-allow-origin"], ORIGIN);
+        let r = c
+            .post(&post_search)
+            .header("Origin", ORIGIN)
+            .bearer_auth(&grant.token)
+            .json(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["cache-control"], "no-store");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(body["entries"][0]["hostname"], "example.com");
+        assert_eq!(body["entries"][0]["password"], "private-value");
+        for (origin, token, host, expected) in [
+            (None, Some(grant.token.as_str()), None, 403),
+            (
+                Some("https://evil.example"),
+                Some(grant.token.as_str()),
+                None,
+                403,
+            ),
+            (
+                Some("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some(grant.token.as_str()),
+                None,
+                403,
+            ),
+            (Some(ORIGIN), None, None, 401),
+            (Some(ORIGIN), Some("wrong"), None, 401),
+            (
+                Some(ORIGIN),
+                Some(grant.token.as_str()),
+                Some("evil.example"),
+                403,
+            ),
+        ] {
+            let mut request = c.post(&post_search).json(&query);
+            if let Some(origin) = origin {
+                request = request.header("Origin", origin);
+            }
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            if let Some(host) = host {
+                request = request.header("Host", host);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status().as_u16(), expected);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert!(body.get("entries").is_none());
+            assert!(!body.to_string().contains("private-value"));
+        }
         let r = c
             .get(&search)
             .header("Origin", ORIGIN)
@@ -161,11 +229,29 @@ fn browser_bridge_requires_exact_origin_token_host_and_unlocked_vault() {
             .await
             .unwrap();
         assert_eq!(r.status(), 403);
+        let r = c
+            .post(&post_search)
+            .header("Origin", ORIGIN)
+            .bearer_auth(&grant.token)
+            .json(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
         vault.lock().unwrap().lock();
         let r = c
             .get(&search)
             .header("Origin", ORIGIN)
             .bearer_auth(&grant.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 423);
+        let r = c
+            .post(&post_search)
+            .header("Origin", ORIGIN)
+            .bearer_auth(&grant.token)
+            .json(&query)
             .send()
             .await
             .unwrap();

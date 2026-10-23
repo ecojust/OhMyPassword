@@ -11,7 +11,7 @@
 | `GET /v1/status` | 无凭据 | `{protocol:1, initialized, locked}`，不含库内容或设备信息 |
 | `POST /v1/browser/connect` | `Authorization: Bearer …` | `{connected:true, protocol:1}` |
 | `GET /v1/credentials?hostname=example.com` | 同上 | `{entries:[…]}`，精确 hostname 匹配 |
-| `POST /v1/credentials/search` | 同上，JSON `{hostname}` | 同上，供需要 POST 的扩展环境使用 |
+| `POST /v1/credentials/search` | 同上，JSON `{hostname}` | 同上；插件使用此查询接口，hostname 不进入 URL |
 | `POST /v1/credentials` | 同上，JSON `EntryInput` | `{entry:…}`；成功后触发设备同步 |
 
 敏感请求同时检查精确 Host、已授权扩展 Origin 和 token；预检只允许已授权扩展。锁定返回 423、无效 token 返回 401、来源/Host 被拒绝返回 403。锁定时浏览器预检可能无法读取 423；插件可使用公开状态接口区分“需要解锁”和“服务未运行”。所有响应禁止缓存。Origin 检查用于隔离网页；拥有本机进程权限的恶意软件不在这一接口隔离边界内。

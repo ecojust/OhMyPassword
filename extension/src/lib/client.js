@@ -76,6 +76,11 @@ export async function readConnection(api) {
   return checkedConnection(data.connection);
 }
 
+export function searchCredentials(connection, hostname, { signal } = {}, fetcher = fetch) {
+  if (typeof hostname !== 'string' || !hostname || hostname.length > 253) throw new Error('网站名称无效。');
+  return request(connection, '/v1/credentials/search', { method: 'POST', body: { hostname }, signal }, fetcher);
+}
+
 export async function saveConnection(api, connection) {
   const value = checkedConnection(connection);
   await api.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' });

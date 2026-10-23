@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { websiteFromUrl, checkedPort, checkedConnection, sameWebsite, extensionOrigin, validateEntries, canFillWebsite } from '../src/lib/model.js';
-import { request, saveConnection } from '../src/lib/client.js';
+import { request, saveConnection, searchCredentials } from '../src/lib/client.js';
 import { fillSelectedEntry } from '../src/lib/fill.js';
 
 test('website matching normalizes hostname and rejects non-web pages and URL credentials', () => {
@@ -43,9 +43,23 @@ test('request fixes loopback destination, omits cookies, disallows redirects, ne
 
 test('locked, revoked and oversized client responses fail clearly', async () => {
   const conn = { token: 'test-only-grant', port: 17841 };
-  await assert.rejects(request(conn, '/v1/credentials', {}, async () => ({ ok: false, status: 423, text: async () => '{}' })), /已锁定/);
-  await assert.rejects(request(conn, '/v1/credentials', {}, async () => ({ ok: false, status: 401, text: async () => '{}' })), /撤销/);
-  await assert.rejects(request(conn, '/v1/credentials', {}, async () => ({ ok: true, text: async () => 'x'.repeat(1048577) })), /过大/);
+  await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: false, status: 423, text: async () => '{}' })), /已锁定/);
+  await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: false, status: 401, text: async () => '{}' })), /撤销/);
+  await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: true, text: async () => 'x'.repeat(1048577) })), /过大/);
+});
+
+test('credential search sends hostname only in JSON POST body and preserves authorization', async () => {
+  let captured;
+  await searchCredentials({ token: 'test-only-grant', port: 17841 }, 'login.example.com', {}, async (url, options) => {
+    captured = { url, options };
+    return new Response('{"entries":[]}');
+  });
+  assert.equal(captured.url, 'http://127.0.0.1:17841/v1/credentials/search');
+  assert.equal(captured.options.method, 'POST');
+  assert.deepEqual(JSON.parse(captured.options.body), { hostname: 'login.example.com' });
+  assert.equal(captured.options.headers['Content-Type'], 'application/json');
+  assert.equal(captured.options.headers.Authorization, 'Bearer test-only-grant');
+  assert.equal(captured.options.headers.Origin, undefined);
 });
 
 test('streaming response cap cancels an oversized stream without reading an unbounded body', async () => {
@@ -54,13 +68,13 @@ test('streaming response cap cancels an oversized stream without reading an unbo
     pull(controller) { controller.enqueue(new Uint8Array(700000)); },
     cancel() { cancelled = true; },
   }));
-  await assert.rejects(request({ token: 'test-only-grant', port: 17841 }, '/v1/credentials', {}, async () => response), /过大/);
+  await assert.rejects(searchCredentials({ token: 'test-only-grant', port: 17841 }, 'example.com', {}, async () => response), /过大/);
   assert.equal(cancelled, true);
 });
 
 test('a locked-vault preflight failure uses only public status to explain the error', async () => {
   const calls = [];
-  await assert.rejects(request({ token: 'test-only-grant', port: 17841 }, '/v1/credentials', {}, async (url, options) => {
+  await assert.rejects(searchCredentials({ token: 'test-only-grant', port: 17841 }, 'example.com', {}, async (url, options) => {
     calls.push({ url, options });
     if (url.endsWith('/v1/status')) return new Response(JSON.stringify({ protocol: 1, locked: true }));
     throw new TypeError('Failed to fetch');

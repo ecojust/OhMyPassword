@@ -1,4 +1,4 @@
-"""Validate committed version metadata before any platform build."""
+"""Validate committed version metadata for every application."""
 
 import json
 import re

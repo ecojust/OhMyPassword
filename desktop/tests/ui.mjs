@@ -93,7 +93,7 @@ try{
  await check('password is fetched on demand, edit persists same record, delete confirms',async page=>{
   assert.equal((await page.content()).includes(fixtureEntry.password),false);assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>c.name==='get_entry')),false);
   await page.locator('[data-entry]').click();await page.locator('#entry-password').waitFor();assert.equal(await page.locator('#entry-password').getAttribute('type'),'password');
-  await click(page,'reveal');assert.equal(await page.locator('#entry-password').getAttribute('type'),'text');await page.locator('#entry-password').fill('new-fixture-password');await page.locator('#entry-form [type=submit]').click();await page.locator('dialog').waitFor({state:'detached'});await ready(page);
+  assert.equal(await page.getByRole('button',{name:'显示密码',exact:true}).count(),1);await click(page,'reveal');assert.equal(await page.getByRole('button',{name:'隐藏密码',exact:true}).count(),1);assert.equal(await page.locator('#entry-password').getAttribute('type'),'text');await page.locator('#entry-password').fill('new-fixture-password');await page.locator('#entry-form [type=submit]').click();await page.locator('dialog').waitFor({state:'detached'});await ready(page);
   assert.equal(await page.evaluate(()=>window.__fixture.entries[0].password),'new-fixture-password');assert.equal(await page.evaluate(()=>window.__fixture.entries[0].id),'record-1');
   await page.locator('[data-entry]').click();await click(page,'delete');assert.equal(await page.evaluate(()=>window.__fixture.entries.length),1);await click(page,'confirm');await page.locator('.empty').waitFor();
  });

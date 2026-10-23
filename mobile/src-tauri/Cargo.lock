@@ -2640,6 +2640,8 @@ dependencies = [
  "ohmypassword-desktop",
  "tauri",
  "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-discovery",
 ]
 
 [[package]]

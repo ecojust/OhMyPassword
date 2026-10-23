@@ -87,4 +87,4 @@ npm run test:core
 npm run test:service
 ```
 
-加密、授权、同步与平台边界详见 [架构说明](ARCHITECTURE.md) 和 [安全说明](SECURITY.md)。
+加密、授权、同步与平台边界详见 [架构说明](ARCHITECTURE.md)、[安全说明](SECURITY.md) 和 [验证记录](VALIDATION.md)。

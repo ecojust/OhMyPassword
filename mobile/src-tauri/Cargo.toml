@@ -14,6 +14,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 ohmypassword-desktop = { package = "ohmypassword-desktop", path = "../../desktop/src-tauri" }
+# Tauri's build script reads plugin metadata only from direct dependencies.
+# Keep these direct even though the shared shell initializes them.
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-discovery = { path = "../plugins/discovery" }
 
 [profile.release]
 opt-level = "s"

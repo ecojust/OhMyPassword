@@ -29,6 +29,7 @@ npm run test:extension
 ## 范围
 
 - `example.com` 与 `login.example.com` 分别匹配，不自动跨子域共用密码。
+- 凭据查询统一使用 `POST /v1/credentials/search`，JSON 请求体为 `{ "hostname": "example.com" }`；hostname 不放进 URL。连接、查询和保存均由浏览器自身发送扩展 Origin，并接受客户端的严格 Origin 与令牌校验。
 - 自动填充要求 HTTPS，避免将同 hostname 的密码填入可被网络篡改的 HTTP 页面；仅本机回环地址作为开发例外。HTTP 网站仍可管理记录，需切到 HTTPS 后填充。
 - 只在用户点击后向主框架填充；不填 iframe，不填标注为 `new-password` 的注册密码框。出现多个登录密码框时停止，避免填错表单。
 - 注入前再次校验页面的 hostname、origin 和标签 ID，跳转后要求重新打开扩展。
@@ -48,4 +49,4 @@ npx playwright install chromium
 npm run test:browser --workspace @ohmypassword/extension
 ```
 
-此检查加载真实扩展，验证浏览器实际发送的 Origin、连接设置、原生脚本注入、主框架限制、跳转拒绝及锁定处理。它使用合成测试账号和临时本地服务，不读写真实密码库；真实客户端接口的加密、授权和同步另由 Rust service 测试覆盖。
+此检查加载真实扩展，验证连接和凭据查询 POST 实际发送的 Origin、hostname 不出现在 URL、连接设置、原生脚本注入、主框架限制、跳转拒绝、账号更新及锁定处理。它使用合成测试账号和临时本地服务，不读写真实密码库；真实客户端接口的加密、授权和同步另由 Rust service 测试覆盖。

@@ -44,8 +44,23 @@ jobs:
         run: npm run build
       - name: Test browser extension
         run: npm run test:extension
-      - name: Install Chromium for real extension and frontend tests
-        run: npx playwright install --with-deps chromium
+      - name: Install Chromium system dependencies
+        # The first hosted runner took 10m32s to fetch 25.9 MB from its APT mirror.
+        timeout-minutes: 15
+        run: npx playwright install-deps chromium
+      - name: Download Chromium for real extension and frontend tests
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: '60000'
+        run: |
+          npx playwright install --no-shell chromium
+          node <<'JS'
+          const fs = require('node:fs');
+          const { chromium } = require('playwright');
+          const executable = chromium.executablePath();
+          if (!fs.existsSync(executable)) throw new Error('Chromium executable is missing');
+          fs.appendFileSync(process.env.GITHUB_ENV, `CHROMIUM_PATH=${executable}\n`);
+          JS
       - name: Test installed extension, request Origin and autofill
         run: npm run test:browser --workspace @ohmypassword/extension
       - name: Test shared desktop and mobile UI
@@ -65,7 +80,6 @@ jobs:
 
   desktop:
     name: Desktop ${{ matrix.platform }}
-    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -128,7 +142,6 @@ jobs:
 
   android:
     name: Android ARM64 development APK
-    needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     env:
@@ -178,7 +191,6 @@ jobs:
 
   ios:
     name: iOS ARM64 Simulator
-    needs: checks
     runs-on: macos-latest
     timeout-minutes: 50
     env:

@@ -4,13 +4,75 @@ import argparse
 import json
 import plistlib
 import re
+import shutil
+import struct
 import xml.etree.ElementTree as ET
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ANDROID = "http://schemas.android.com/apk/res/android"
 ET.register_namespace("android", ANDROID)
 ET.register_namespace("tools", "http://schemas.android.com/tools")
+
+
+def android_resource_exists(directory, reference):
+    match = re.fullmatch(r"@(mipmap|drawable|color)/([A-Za-z0-9_]+)", reference)
+    assert match, f"Unexpected launcher resource: {reference}"
+    kind, name = match.groups()
+    if kind == "color":
+        return any(
+            element.get("name") == name
+            for path in directory.glob("values*/*.xml")
+            for element in ET.parse(path).getroot().findall("color")
+        )
+    return any(path.is_file() for path in directory.glob(f"{kind}*/{name}.*"))
+
+
+def copy_android_icons(project):
+    source = ROOT / "desktop/src-tauri/icons/android"
+    destination = project / "app/src/main/res"
+    assert source.is_dir(), "Generate the shared Android icons first"
+    assert destination.is_dir(), "Android resources directory is missing; run init first"
+    manifest = ET.parse(project / "app/src/main/AndroidManifest.xml").getroot()
+    application = manifest.find("application")
+    references = [application.get(f"{{{ANDROID}}}{name}") for name in ("icon", "roundIcon")]
+    assert references[0], "Android launcher icon is not declared"
+    for path in source.rglob("*.xml"):
+        for element in ET.parse(path).iter():
+            references.extend(value for value in element.attrib.values() if value.startswith("@"))
+    for reference in filter(None, references):
+        assert android_resource_exists(source, reference), f"Missing shared launcher resource: {reference}"
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+    for path in source.rglob("*"):
+        if path.is_file():
+            assert path.read_bytes() == (destination / path.relative_to(source)).read_bytes()
+    for reference in filter(None, references):
+        assert android_resource_exists(destination, reference), f"Missing generated launcher resource: {reference}"
+    print("Android launcher icons copied; adaptive foreground/background references verified")
+
+
+def copy_ios_icons(project):
+    source = ROOT / "desktop/src-tauri/icons/ios"
+    destination = project / "Assets.xcassets/AppIcon.appiconset"
+    contents = json.loads((destination / "Contents.json").read_text(encoding="utf-8"))
+    images = contents.get("images", [])
+    assert images, "Generated iOS AppIcon Contents.json has no images"
+    for item in images:
+        filename = item.get("filename")
+        assert filename and Path(filename).name == filename, f"Invalid iOS icon entry: {item}"
+        icon = source / filename
+        assert icon.is_file(), f"Missing shared iOS icon required by Contents.json: {filename}"
+        with icon.open("rb") as file:
+            header = file.read(24)
+        assert header[:8] == b"\x89PNG\r\n\x1a\n" and header[12:16] == b"IHDR", filename
+        actual = struct.unpack(">II", header[16:24])
+        scale = Decimal(item["scale"].removesuffix("x"))
+        expected = tuple(int(Decimal(size) * scale) for size in item["size"].split("x"))
+        assert actual == expected, f"Incorrect iOS icon dimensions: {filename}: {actual}, expected {expected}"
+        shutil.copy2(icon, destination / filename)
+        assert icon.read_bytes() == (destination / filename).read_bytes()
+    print(f"iOS launcher icons copied; all {len(images)} Contents.json entries and PNG dimensions verified")
 
 
 def android():
@@ -47,6 +109,7 @@ def android():
             application.set(f"{{{ANDROID}}}usesCleartextTraffic", "false")
         ET.indent(tree, space="    ")
         tree.write(path, encoding="utf-8", xml_declaration=True)
+    copy_android_icons(project)
     print("Android prepared: compile/target SDK 36, minimum API 24, backup disabled, WebView cleartext disabled")
 
 
@@ -60,6 +123,7 @@ def ios():
     assert "_ohmypassword._tcp." in info.get("NSBonjourServices", [])
     assert info.get("NSLocalNetworkUsageDescription"), "Missing local-network explanation"
     assert list((directory / "gen/apple").glob("*.xcodeproj/project.pbxproj")), "Run tauri ios init first"
+    copy_ios_icons(directory / "gen/apple")
     print("iOS prepared: minimum iOS 15, Bonjour service declared, local-network purpose declared")
     print("CI builds only an unsigned ARM64 Simulator app; physical-device distribution needs Apple signing.")
 

@@ -26,7 +26,7 @@ const server = createServer(async (req, res) => {
     res.end(`<!doctype html><html><body><h1>Test login</h1><form id="login"><input id="user" autocomplete="username"><input id="secret" type="password" autocomplete="current-password"><button type="submit">Login</button></form><iframe src="http://localhost:${server.address().port}/frame"></iframe><script>window.submitted=0;window.changes=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submitted++});document.addEventListener('input',()=>window.changes++);</script></body></html>`); return;
   }
   // Capture request metadata only. Deliberately never log Authorization or request bodies.
-  calls.push({ path: url.pathname, method: req.method, origin: req.headers.origin ?? '(absent)' });
+  calls.push({ path: url.pathname, query: url.search, method: req.method, origin: req.headers.origin ?? '(absent)' });
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'application/json');
   if (req.headers.origin !== authorizedOrigin || !authorizedOrigin) {
@@ -43,8 +43,10 @@ const server = createServer(async (req, res) => {
   if (req.headers.authorization !== `Bearer ${grant}`) { res.writeHead(401); res.end('{}'); return; }
   if (locked) { res.writeHead(423); res.end('{}'); return; }
   if (url.pathname === '/v1/browser/connect') { res.end(JSON.stringify({ connected: true, protocol: 1 })); return; }
-  if (url.pathname === '/v1/credentials' && req.method === 'GET') {
-    res.end(JSON.stringify({ entries: entries.filter(entry => entry.hostname === url.searchParams.get('hostname')) })); return;
+  if (url.pathname === '/v1/credentials/search' && req.method === 'POST') {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const search = JSON.parse(body);
+    res.end(JSON.stringify({ entries: entries.filter(entry => entry.hostname === search.hostname) })); return;
   }
   if (url.pathname === '/v1/credentials' && req.method === 'POST') {
     let body = ''; for await (const chunk of req) body += chunk;
@@ -85,16 +87,17 @@ try {
   console.log('PASS: real Chromium extension POST includes its Origin and stores only the connection grant.');
 
   const lookup = await page.evaluate(async () => {
-    const { request, readConnection } = await import('./lib/client.js');
-    try { return { ok: true, result: await request(await readConnection(chrome), '/v1/credentials?hostname=127.0.0.1') }; }
+    const { searchCredentials, readConnection } = await import('./lib/client.js');
+    try { return { ok: true, result: await searchCredentials(await readConnection(chrome), '127.0.0.1') }; }
     catch (error) { return { ok: false, message: error.message }; }
   });
-  const getCall = calls.find(call => call.path === '/v1/credentials' && call.method === 'GET');
-  assert.ok(getCall, 'Extension never reached local GET endpoint.');
-  assert.equal(getCall.origin, authorizedOrigin, `Real Chromium GET Origin was ${getCall.origin}; client/server protocol must be corrected before shipping.`);
+  const searchCall = calls.find(call => call.path === '/v1/credentials/search' && call.method === 'POST');
+  assert.ok(searchCall, 'Extension never reached local POST search endpoint.');
+  assert.equal(searchCall.origin, authorizedOrigin, `Real Chromium search POST Origin was ${searchCall.origin}; client/server protocol must be corrected before shipping.`);
+  assert.equal(searchCall.query, '', 'Credential search must not expose the hostname in the request URL.');
   assert.equal(lookup.ok, true, lookup.message);
   assert.equal(lookup.result.entries.length, 1);
-  console.log('PASS: real Chromium GET includes the authorized extension Origin.');
+  console.log('PASS: real Chromium search POST includes its authorized Origin and keeps hostname out of the URL.');
 
   const site = await context.newPage();
   await site.goto(`http://127.0.0.1:${port}/login`);
@@ -106,8 +109,8 @@ try {
   }, { port });
   const fill = await page.evaluate(async target => {
     const { fillSelectedEntry } = await import('./lib/fill.js');
-    const { request, readConnection } = await import('./lib/client.js');
-    const { entries } = await request(await readConnection(chrome), '/v1/credentials?hostname=127.0.0.1');
+    const { searchCredentials, readConnection } = await import('./lib/client.js');
+    const { entries } = await searchCredentials(await readConnection(chrome), '127.0.0.1');
     return fillSelectedEntry(chrome, target, entries[0]);
   }, target);
   assert.equal(fill.ok, true);
@@ -138,8 +141,8 @@ try {
   assert.equal(entries.length, 1); assert.equal(entries[0].password, 'changed-test-only-secret');
   locked = true;
   const error = await page.evaluate(async () => {
-    const { request, readConnection } = await import('./lib/client.js');
-    try { await request(await readConnection(chrome), '/v1/credentials?hostname=127.0.0.1'); return ''; }
+    const { searchCredentials, readConnection } = await import('./lib/client.js');
+    try { await searchCredentials(await readConnection(chrome), '127.0.0.1'); return ''; }
     catch (error) { return error.message; }
   });
   assert.match(error, /已锁定/);

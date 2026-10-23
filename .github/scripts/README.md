@@ -10,6 +10,9 @@ Python 3.11 or newer and run from any working directory.
   traffic, and checks the discovery plugin SDK. Run it after Android init.
 - `prepare-mobile.py ios` checks the generated Xcode project and the declared
   Bonjour service / local-network purpose. Run it after iOS init.
+- Both mobile preparation commands copy the shared launcher artwork from
+  `desktop/src-tauri/icons` into the generated native projects. Android adaptive
+  icon references and every iOS `Contents.json` entry / PNG dimension are checked.
 - `verify-macos-bundle.py --target aarch64-apple-darwin` verifies the DMG,
   minimum macOS version, complete application signature and installed startup.
 - `collect-artifacts.py PLATFORM [--target RUST_TARGET]` checks real outputs,
@@ -31,6 +34,12 @@ cargo test --locked --manifest-path desktop/service/Cargo.toml
 
 The real extension test must load the extension in an environment where that
 is permitted. Browser policy blocking extensions is not a passing result.
+CI installs system dependencies and downloads Chromium in separate steps, with
+15-minute and five-minute timeouts respectively. The dependency budget accounts
+for the observed slow hosted-runner APT mirror. It downloads the full Chromium browser only and sets
+`CHROMIUM_PATH` for both tests, so a second headless-shell download is unnecessary.
+Tests and native builds run in parallel; a successful platform artifact does not
+mean the complete workflow passed.
 
 The mobile jobs generate their native projects before building:
 

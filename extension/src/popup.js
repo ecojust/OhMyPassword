@@ -1,5 +1,5 @@
 import { canFillWebsite, extensionOrigin, sameWebsite, validateEntries, websiteFromUrl } from './lib/model.js';
-import { readConnection, request } from './lib/client.js';
+import { readConnection, request, searchCredentials } from './lib/client.js';
 import { fillSelectedEntry } from './lib/fill.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -57,7 +57,7 @@ function renderEntries() {
       try {
         // Re-fetch immediately: revoked grants, locked vaults and changed passwords must take effect.
         const connection = await readConnection(api);
-        const payload = await request(connection, `/v1/credentials?hostname=${encodeURIComponent(target.hostname)}`);
+        const payload = await searchCredentials(connection, target.hostname);
         const latest = validateEntries(payload, target.hostname).find(item => item.id === entry.id);
         if (!latest) throw new Error('这个账号已被删除，请刷新列表。');
         const result = await fillSelectedEntry(api, target, latest);
@@ -85,7 +85,7 @@ async function load() {
     $('site').textContent = site.hostname;
     const connection = await readConnection(api);
     extensionOrigin(api);
-    const payload = await request(connection, `/v1/credentials?hostname=${encodeURIComponent(site.hostname)}`, { signal: controller.signal });
+    const payload = await searchCredentials(connection, site.hostname, { signal: controller.signal });
     if (current !== requestId) return;
     if (!sameWebsite(target, await api.tabs.get(target.id))) throw new Error('页面已跳转，请重新打开扩展。');
     entries = validateEntries(payload, site.hostname);
