@@ -1,0 +1,23 @@
+{
+  "name": "@ohmypassword/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "test:ui": "node tests/ui.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "playwright": "^1.64.1",
+    "typescript": "~5.7.3",
+    "vite": "^6.1.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@ohmypassword/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "npm run build --workspace @ohmypassword/desktop",
+    "android:init": "tauri android init --ci && python3 ../.github/scripts/prepare-mobile.py android",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build --debug",
+    "ios:init": "tauri ios init --ci && python3 ../.github/scripts/prepare-mobile.py ios",
+    "ios:dev": "tauri ios dev",
+    "ios:build": "tauri ios build --debug"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

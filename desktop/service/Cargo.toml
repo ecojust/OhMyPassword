@@ -1,0 +1,28 @@
+[package]
+name = "ohmypassword-service"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Authenticated local bridge and encrypted LAN synchronization for OhMyPassword"
+
+[dependencies]
+ohmypassword-core = { path = "../core" }
+axum = "0.8"
+aes-gcm = "0.10"
+base64 = "0.22"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tower = { version = "0.5", features = ["limit", "timeout"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+mdns-sd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

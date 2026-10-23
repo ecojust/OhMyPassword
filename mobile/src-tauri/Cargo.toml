@@ -1,0 +1,23 @@
+[package]
+name = "ohmypassword-mobile"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "ohmypassword_mobile"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+ohmypassword-desktop = { package = "ohmypassword-desktop", path = "../../desktop/src-tauri" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

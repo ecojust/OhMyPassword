@@ -1,0 +1,3 @@
+[default]
+description = "Discovery is controlled by the native shell, not exposed to the WebView."
+permissions = []

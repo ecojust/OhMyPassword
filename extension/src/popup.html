@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OhMyPassword</title><link rel="stylesheet" href="styles.css"></head>
+<body class="popup"><main>
+  <header><div><h1>OhMyPassword</h1><div class="muted">密码留在你的设备上</div></div><button id="settings" class="quiet">连接设置</button></header>
+  <div id="site" class="site">正在读取当前网站…</div>
+  <div id="status" class="notice" role="status" aria-live="polite"></div>
+  <section id="accounts-section"><div class="row"><h2>匹配的账号</h2><button id="refresh" class="quiet">刷新</button></div><div id="accounts"></div><button id="add" class="wide" disabled>添加此网站的账号</button></section>
+  <form id="entry-form" hidden autocomplete="off">
+    <h2 id="form-title">添加账号</h2>
+    <label for="hostname">网站</label><input id="hostname" readonly>
+    <label for="title">名称</label><input id="title" maxlength="200" placeholder="例如：个人账号">
+    <label for="username">账号</label><input id="username" maxlength="1000" autocomplete="off" required>
+    <label for="password">密码</label><input id="password" type="password" maxlength="4096" autocomplete="off" required>
+    <label class="check"><input id="show-password" type="checkbox">显示密码</label>
+    <label for="notes">备注（可选）</label><textarea id="notes" maxlength="4000"></textarea>
+    <p class="muted">确认后保存到本机密码库，并同步到已配对且在线的设备。</p>
+    <div class="save-actions"><button class="primary" id="save" type="submit">确认保存</button><button id="cancel" type="button">取消</button></div>
+  </form>
+  <footer>仅匹配当前 hostname。填充后由你确认登录，不自动提交表单。</footer>
+</main><script type="module" src="popup.js"></script></body></html>

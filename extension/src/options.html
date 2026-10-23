@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OhMyPassword · 连接设置</title><link rel="stylesheet" href="styles.css"></head>
+<body><main class="settings">
+  <header><div><h1>连接 OhMyPassword</h1><p class="muted">连接当前电脑上的密码库</p></div></header>
+  <p>先打开并解锁客户端，在「浏览器授权」中添加下面的扩展标识，然后将客户端生成的连接令牌填入这里。</p>
+  <label for="origin">此扩展的标识</label><input id="origin" readonly spellcheck="false"><div class="row"><button id="copy-origin" type="button">复制扩展标识</button></div>
+  <form id="connect-form" autocomplete="off">
+    <label for="port">客户端本地端口</label><input id="port" type="number" value="17841" min="1024" max="65535" required>
+    <p class="muted">仅连接 127.0.0.1。通常无需修改端口。</p>
+    <label for="token">连接令牌</label><input id="token" type="password" autocomplete="off" maxlength="1024" required placeholder="粘贴客户端生成的令牌">
+    <div class="row"><button id="connect" class="primary" type="submit">验证并连接</button><button id="disconnect" class="danger" type="button">清除本机连接</button></div>
+  </form>
+  <div id="status" class="notice" role="status" aria-live="polite"></div>
+  <footer>扩展只保存连接令牌和端口，不保存账号密码。清除连接会移除浏览器内的令牌；如需撤销授权，请同时在客户端移除此扩展。使用后可在客户端锁定密码库。</footer>
+</main><script type="module" src="options.js"></script></body></html>

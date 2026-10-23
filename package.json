@@ -1,0 +1,13 @@
+{
+  "name": "ohmypassword",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["desktop", "mobile", "extension"],
+  "scripts": {
+    "build": "npm run build --workspace @ohmypassword/desktop && npm run build --workspace @ohmypassword/extension",
+    "test:extension": "npm test --workspace @ohmypassword/extension",
+    "test:core": "cargo test --locked --manifest-path desktop/core/Cargo.toml",
+    "test:service": "cargo test --locked --manifest-path desktop/service/Cargo.toml"
+  },
+  "engines": { "node": ">=22" }
+}

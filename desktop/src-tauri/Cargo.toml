@@ -1,0 +1,32 @@
+[package]
+name = "ohmypassword-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Local encrypted password manager"
+
+[lib]
+name = "ohmypassword_desktop"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+ohmypassword-core = { package = "ohmypassword-core", path = "../core" }
+ohmypassword-service = { package = "ohmypassword-service", path = "../service" }
+local-ip-address = "0.6"
+zeroize = "1"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-discovery = { path = "../../mobile/plugins/discovery" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
