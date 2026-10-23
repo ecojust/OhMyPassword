@@ -5,6 +5,15 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Platforms to verify
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - android
 
 permissions:
   contents: read
@@ -20,6 +29,7 @@ env:
 jobs:
   checks:
     name: Core, service and extension
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -80,6 +90,7 @@ jobs:
 
   desktop:
     name: Desktop ${{ matrix.platform }}
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +157,11 @@ jobs:
     timeout-minutes: 50
     env:
       NDK_VERSION: '27.2.12479018'
+      # Keep the debug APK/signing variant while optimizing its Rust library.
+      CARGO_PROFILE_DEV_OPT_LEVEL: 's'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_DEV_STRIP: symbols
+      CARGO_PROFILE_DEV_CODEGEN_UNITS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -202,6 +218,7 @@ jobs:
 
   ios:
     name: iOS ARM64 Simulator
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     runs-on: macos-latest
     timeout-minutes: 50
     env:
