@@ -18,6 +18,22 @@
 
 [手机设备同步界面预览（模拟测试数据）](mobile/docs/previews/mobile-devices.png)
 
+## 测试包与大小
+
+桌面、插件和 iOS 模拟器包见 [完整构建](https://github.com/ecojust/OhMyPassword/actions/runs/39995965398)，Android 使用 [优化后的开发构建](https://github.com/ecojust/OhMyPassword/actions/runs/39997614999)。在运行页面底部的 **Artifacts** 下载，需登录 GitHub；测试产物保留 14 天，每组附有 `SHA256SUMS.txt`。
+
+| 产物 | 平台 | 实际文件大小 |
+| --- | --- | ---: |
+| 浏览器插件 ZIP | Chrome / Edge | 12.1 KiB |
+| 桌面安装器 | Windows x64 | 1.58 MiB |
+| 桌面便携 EXE | Windows x64 | 4.36 MiB |
+| 桌面 DMG | macOS ARM64 | 2.02 MiB |
+| 桌面 DEB | Linux x64 | 2.33 MiB |
+| 开发 APK，Rust 代码已优化 | Android ARM64 | 13.45 MiB |
+| 模拟器 App ZIP | iOS ARM64 Simulator | 18.75 MiB |
+
+大小按实际下载文件统计。桌面使用系统 WebView：Windows 需要 WebView2，Linux 需要 GTK / WebKitGTK，macOS 使用系统 WebKit；上述体积不包含系统运行时。移动包均供开发测试，Android 使用开发签名，iOS 模拟器包不能直接安装到 iPhone。下载后先解压 Actions 外层 ZIP；插件还需解压内层 ZIP，并按 [插件说明](extension/README.md) 加载。
+
 ## 使用流程
 
 1. 在客户端创建密码库，设置主密码和设备名称。主密码只用于本机解锁；另一设备可以使用不同主密码。
@@ -78,7 +94,7 @@ npm run build --workspace @ohmypassword/extension
 npm run test:extension
 ```
 
-手机构建步骤与必要配置见 [`mobile/`](mobile/)。Android 开发签名包可以安装测试；iOS 模拟器构建无需分发证书，真机安装与分发需自己的 Apple 签名。构建结果见 [GitHub Actions](https://github.com/ecojust/OhMyPassword/actions)，实际安装包大小以构建产物为准，不把前端资源大小作为软件整体大小。
+手机构建步骤与必要配置见 [`mobile/`](mobile/)。Android 开发签名包可以安装测试；iOS 模拟器构建无需分发证书，真机安装与分发需自己的 Apple 签名。最新构建结果见 [GitHub Actions](https://github.com/ecojust/OhMyPassword/actions)。
 
 核心与服务测试：
 

@@ -30,6 +30,8 @@ npm run tauri --workspace @ohmypassword/mobile -- ios build --ci --debug --targe
 
 `android:init` / `ios:init` 会调用 Tauri 生成平台工程，然后运行 `.github/scripts/prepare-mobile.py`：Android 固定 SDK 36，关闭系统备份和 WebView 明文网络；iOS 检查本地网络用途说明和 Bonjour 声明。生成工程位于 `src-tauri/gen/`，不作为手写代码维护。iOS 真机安装及分发需要用户自己的 Apple 开发者签名，CI 模拟器 `.app` 不能直接安装到 iPhone。
 
+CI 的 Android 开发包会对 Rust 启用体积优化并移除调试信息，保留开发签名。本地默认调试构建包含调试信息，体积较大；复现 CI 小包的环境变量与命令见 [构建脚本说明](../.github/scripts/README.md)。
+
 主要代码：`src-tauri/` 是移动入口，`plugins/discovery/` 是 Android NSD / iOS Bonjour 及后台预览保护；共享界面在 `../desktop/src/`，加密核心和 HTTP 同步服务在 `../desktop/core/`、`../desktop/service/`。
 
 ## 验证
