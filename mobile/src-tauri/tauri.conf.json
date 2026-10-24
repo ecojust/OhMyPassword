@@ -1,5 +1,5 @@
 {
-  "$schema":"https://schema.tauri.app/config/2", "productName":"OhMyPassword", "version":"0.2.1", "identifier":"com.ecojust.ohmypassword",
+  "$schema":"https://schema.tauri.app/config/2", "productName":"OhMyPassword", "version":"0.2.2", "identifier":"com.ecojust.ohmypassword",
   "build":{"beforeDevCommand":"npm run dev --workspace @ohmypassword/desktop","devUrl":"http://localhost:1421","beforeBuildCommand":"npm run build --workspace @ohmypassword/desktop","frontendDist":"../../desktop/dist"},
   "app":{"windows":[{"label":"main","title":"OhMyPassword","width":420,"height":860}],"security":{"csp":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"}},
   "bundle":{"active":true,"icon":["../../desktop/src-tauri/icons/32x32.png","../../desktop/src-tauri/icons/128x128.png","../../desktop/src-tauri/icons/128x128@2x.png","../../desktop/src-tauri/icons/icon.icns","../../desktop/src-tauri/icons/icon.ico"],"android":{"minSdkVersion":24},"iOS":{"minimumSystemVersion":"15.0","infoPlist":"../Info.plist"}}

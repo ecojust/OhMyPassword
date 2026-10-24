@@ -71,6 +71,8 @@ jobs:
           if (!fs.existsSync(executable)) throw new Error('Chromium executable is missing');
           fs.appendFileSync(process.env.GITHUB_ENV, `CHROMIUM_PATH=${executable}\n`);
           JS
+      - name: Test login-page DOM adapters and staged filling
+        run: npm run test:login-pages --workspace @ohmypassword/extension
       - name: Test installed extension, request Origin and autofill
         run: npm run test:browser --workspace @ohmypassword/extension
       - name: Test shared desktop and mobile UI

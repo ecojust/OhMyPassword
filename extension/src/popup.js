@@ -1,6 +1,7 @@
 import { canFillWebsite, credentialForSave, sameWebsite, validateEntries, websiteFromUrl } from './lib/model.js';
-import { readConnection, request, searchCredentials } from './lib/client.js';
-import { fillSelectedEntry } from './lib/fill.js';
+import { readConnection, request, searchWebsiteCredentials } from './lib/client.js';
+import { fillSelectedEntry, fillSuccessMessage } from './lib/fill.js';
+import { OPTIONAL_LOGIN_ORIGINS } from './lib/sites.js';
 
 const api = globalThis.browser ?? globalThis.chrome;
 const $ = id => document.getElementById(id);
@@ -10,6 +11,7 @@ let editingEntry = null;
 let controller = null;
 let requestId = 0;
 let busy = false;
+let pendingOrigins = [];
 
 function status(message, type = '') { $('status').textContent = message; $('status').className = `notice ${type}`; }
 function clearSecrets() {
@@ -18,6 +20,8 @@ function clearSecrets() {
   $('entry-form').reset();
   $('password').type = 'password';
   editingEntry = null;
+  pendingOrigins = [];
+  $('allow-login-frame').hidden = true;
   controller?.abort();
   requestId++;
 }
@@ -58,12 +62,19 @@ function renderEntries() {
       try {
         // Re-fetch immediately: locked vaults and changed passwords must take effect.
         const connection = await readConnection(api);
-        const payload = await searchCredentials(connection, target.hostname);
+        const payload = await searchWebsiteCredentials(connection, target.hostname, { signal: controller?.signal });
         const latest = validateEntries(payload, target.hostname).find(item => item.id === entry.id);
         if (!latest) throw new Error('这个账号已被删除，请刷新列表。');
-        const result = await fillSelectedEntry(api, target, latest);
-        status(result.usernameFilled ? '账号与密码已填入，请在网页确认登录。' : '密码已填入，请在网页确认账号并登录。', 'success');
-      } catch (error) { clearSecrets(); status(error.message, 'error'); }
+        const result = await fillSelectedEntry(api, target, latest, { signal: controller?.signal });
+        status(fillSuccessMessage(result), 'success');
+      } catch (error) {
+        clearSecrets(); status(error.message, 'error');
+        if (error.code === 'LOGIN_FRAME_PERMISSION' && error.origins?.length && error.origins.every(origin => OPTIONAL_LOGIN_ORIGINS.includes(origin))) {
+          pendingOrigins = [...error.origins];
+          $('allow-login-frame').textContent = `允许访问 ${new URL(pendingOrigins[0]).hostname} 登录框`;
+          $('allow-login-frame').hidden = false;
+        }
+      }
       finally { busy = false; fill.disabled = false; }
     });
     const edit = document.createElement('button'); edit.className = 'quiet'; edit.textContent = '修改'; edit.addEventListener('click', () => showForm(entry));
@@ -72,7 +83,7 @@ function renderEntries() {
 }
 
 async function load() {
-  if (busy) return;
+  if (busy) return false;
   clearSecrets(); closeForm();
   const current = ++requestId;
   controller = new AbortController();
@@ -82,19 +93,39 @@ async function load() {
     const [tab] = await api.tabs.query({ active: true, currentWindow: true });
     const site = websiteFromUrl(tab?.url);
     if (!site || typeof tab.id !== 'number') throw new Error('请在普通 HTTP 或 HTTPS 网站打开扩展。');
-    target = { id: tab.id, ...site };
+    target = { id: tab.id, url: tab.url, ...site };
     $('site').textContent = site.hostname;
     const connection = await readConnection(api);
-    const payload = await searchCredentials(connection, site.hostname, { signal: controller.signal });
-    if (current !== requestId) return;
+    const payload = await searchWebsiteCredentials(connection, site.hostname, { signal: controller.signal });
+    if (current !== requestId) return false;
     if (!sameWebsite(target, await api.tabs.get(target.id))) throw new Error('页面已跳转，请重新打开扩展。');
     entries = validateEntries(payload, site.hostname);
     renderEntries(); $('add').disabled = false;
     status(canFillWebsite(target) ? '' : '当前网站使用 HTTP。可管理账号，但需要切换到 HTTPS 后才能填充。');
-  } catch (error) { if (current === requestId) status(error.message, 'error'); }
+    return true;
+  } catch (error) { if (current === requestId) status(error.message, 'error'); return false; }
 }
 
 $('settings').addEventListener('click', () => api.runtime.openOptionsPage());
+$('allow-login-frame').addEventListener('click', async () => {
+  if (busy || !pendingOrigins.length) return;
+  const origins = [...pendingOrigins];
+  if (!origins.every(origin => OPTIONAL_LOGIN_ORIGINS.includes(origin))) return;
+  busy = true;
+  $('allow-login-frame').disabled = true;
+  try {
+    // Invoke directly from this click, before any await, to retain user gesture.
+    const permission = api.permissions.request({ origins });
+    const allowed = await permission;
+    busy = false;
+    if (allowed) {
+      if (await load()) status('已允许访问此登录框，请再次选择账号填充。', 'success');
+    } else {
+      status('未允许访问登录框。你可以稍后授权，或在客户端复制账号密码。', 'error');
+    }
+  } catch (error) { status(error.message || '浏览器未完成授权，请重新打开扩展后重试。', 'error'); }
+  finally { busy = false; $('allow-login-frame').disabled = false; }
+});
 $('refresh').addEventListener('click', load);
 $('add').addEventListener('click', () => target && showForm());
 $('cancel').addEventListener('click', closeForm);

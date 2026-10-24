@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-discovery"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["ecojust"]
 description = "Native Bonjour/NSD discovery for OhMyPassword"
 edition = "2021"

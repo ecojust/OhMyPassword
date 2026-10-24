@@ -1,12 +1,13 @@
 {
   "name": "@ohmypassword/extension",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.mjs",
-    "test:browser": "node tests/browser.mjs"
+    "test:browser": "node tests/browser.mjs",
+    "test:login-pages": "node tests/login-pages.mjs"
   },
   "dependencies": {
     "tldts": "7.4.19"

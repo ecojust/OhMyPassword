@@ -93,9 +93,17 @@ try{
   await page.locator('#master-password').fill('wrong-password');await page.locator('#gate-form button').click();await page.getByText('主密码错误',{exact:true}).waitFor();
   assert.equal(await page.locator('#master-password').inputValue(),'');assert.equal(await page.locator('.shell').count(),0);await unlock(page);
  },{locked:true});
+ await check('account visibility is opt-in and preserves search across tabs',async page=>{
+  const toggle=page.getByRole('switch',{name:'账号明文显示'});
+  assert.equal(await toggle.isChecked(),false);assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);
+  await page.locator('#search').fill('Example');await toggle.check();assert.match(await page.locator('.entries').innerText(),/test-user/);assert.equal(await page.locator('#search').inputValue(),'Example');
+  await page.locator('[data-tab=devices]').click();await page.locator('[data-tab=vault]').click();assert.equal(await toggle.isChecked(),true);assert.equal(await page.locator('#search').inputValue(),'Example');
+  await toggle.uncheck();assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);assert.match(await page.locator('.entries').innerText(),/账号已隐藏/);
+  assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
+ });
  await check('password is fetched on demand, edit persists same record, delete confirms',async page=>{
   assert.equal((await page.content()).includes(fixtureEntry.password),false);assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>c.name==='get_entry')),false);
-  await page.locator('[data-entry]').click();await page.locator('#entry-password').waitFor();assert.equal(await page.locator('#entry-password').getAttribute('type'),'password');
+  await page.locator('[data-entry]').click();await page.locator('#entry-password').waitFor();assert.equal(await page.locator('#entry-password').getAttribute('type'),'password');assert.equal(await page.locator('#entry-form [name=username]').inputValue(),fixtureEntry.username);
   assert.equal(await page.getByRole('button',{name:'显示密码',exact:true}).count(),1);await click(page,'reveal');assert.equal(await page.getByRole('button',{name:'隐藏密码',exact:true}).count(),1);assert.equal(await page.locator('#entry-password').getAttribute('type'),'text');await page.locator('#entry-password').fill('new-fixture-password');await page.locator('#entry-form [type=submit]').click();await page.locator('dialog').waitFor({state:'detached'});await ready(page);
   assert.equal(await page.evaluate(()=>window.__fixture.entries[0].password),'new-fixture-password');assert.equal(await page.evaluate(()=>window.__fixture.entries[0].id),'record-1');
   await page.locator('[data-entry]').click();await click(page,'delete');assert.equal(await page.evaluate(()=>window.__fixture.entries.length),1);await click(page,'confirm');await page.locator('.empty').waitFor();
@@ -107,8 +115,10 @@ try{
   assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>['list_clients','create_client','revoke_client'].includes(c.name))),false);
  });
  await check('locking clears open password and secret controls',async page=>{
+  await page.getByRole('switch',{name:'账号明文显示'}).check();
   await page.locator('[data-entry]').click();await page.locator('#entry-password').waitFor();await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();
   assert.equal((await page.content()).includes(fixtureEntry.password),false);assert.equal(await page.locator('dialog').count(),0);await unlock(page);assert.equal(await page.locator('dialog').count(),0);
+  assert.equal(await page.getByRole('switch',{name:'账号明文显示'}).isChecked(),false);assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);
  });
  await check('late password reply cannot restore dialog after lock',async page=>{
   await page.evaluate(()=>window.__fixture.delays.get_entry=true);await page.locator('[data-entry]').click();await page.waitForFunction(()=>!!window.__fixture.pending.get_entry);
@@ -176,7 +186,8 @@ try{
   await unlock(page);assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);
  },{merges:[incoming]});
  await check('mobile layout remains usable without horizontal overflow',async page=>{
-  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.locator('[data-tab=devices]').click();await page.getByText('123456',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-devices',{fullPage:false});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).check();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).uncheck();assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);await shot(page,'mobile-vault',{fullPage:false});
+  await page.locator('[data-tab=devices]').click();await page.getByText('123456',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-devices',{fullPage:false});
   await page.evaluate(()=>{window.__fixture.discovered[0].name='A'.repeat(64);window.__fixture.merges[0].peer_name='B'.repeat(64);});await tick(page);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
  },{mobile:true,discovered:[peer],merges:[incoming]});
  await check('local vault remains available when networking failed',async page=>{

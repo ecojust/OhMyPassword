@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
+import { runLoginExtensionChecks } from './browser-login.mjs';
 
 const extension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
 // Use the shipped, bundled PSL helper in the stub as well as in real Chromium.
@@ -156,6 +157,8 @@ try {
     await request(connection, '/v1/credentials', { method: 'POST', body: { id: 'account-1', hostname: '127.0.0.1', title: 'Updated', username: 'test-alice', password: 'changed-test-only-secret', notes: '' } });
   });
   assert.equal(entries.length, 1); assert.equal(entries[0].password, 'changed-test-only-secret');
+
+  await runLoginExtensionChecks({ context, page, extensionOrigin, port });
 
   // HTTPS pages are intercepted locally; no test credentials reach a real site.
   // Do not expand production host permissions. These scenarios exercise real

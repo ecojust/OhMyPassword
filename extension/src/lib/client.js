@@ -1,4 +1,5 @@
-import { checkedConnection, readableError } from './model.js';
+import { checkedConnection, readableError, validateEntries } from './model.js';
+import { credentialLookupHosts } from './sites.js';
 
 const MAX_RESPONSE_BYTES = 1048576;
 async function readBoundedBody(response) {
@@ -85,6 +86,19 @@ export async function readConnection(api) {
 export function searchCredentials(connection, hostname, { signal } = {}, fetcher = fetch) {
   if (typeof hostname !== 'string' || !hostname || hostname.length > 253) throw new Error('网站名称无效。');
   return request(connection, '/v1/credentials/search', { method: 'POST', body: { hostname }, signal }, fetcher);
+}
+
+export async function searchWebsiteCredentials(connection, hostname, options = {}, fetcher = fetch) {
+  const hosts = credentialLookupHosts(hostname);
+  if (!hosts.length) throw new Error('网站名称无效。');
+  // Only static first-party login aliases can add queries; never page links.
+  const responses = await Promise.all(hosts.map(host => searchCredentials(connection, host, options, fetcher)));
+  const entries = new Map();
+  for (const response of responses) {
+    for (const entry of validateEntries(response, hostname)) entries.set(entry.id, entry);
+  }
+  if (entries.size > 2000) throw new Error('匹配账号过多，请在客户端整理后重试。');
+  return { entries: [...entries.values()] };
 }
 
 export async function saveConnection(api, connection) {

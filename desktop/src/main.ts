@@ -11,6 +11,7 @@ let status:AppStatus|null = null;
 let entries:EntrySummary[] = [];
 let tab:'vault'|'devices'|'browser' = 'vault';
 let query = '';
+let showUsernames = false;
 let busy = false;
 let notice = '';
 let isError = false;
@@ -28,7 +29,7 @@ let lastActivity = 0;
 
 const when = (value?:number|null) => value ? new Date(value < 1e12 ? value*1000 : value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '暂无记录';
 const api = async <T>(command:string,args:Record<string,unknown>={}):Promise<T> => { const generation=epoch; const result=await invoke<T>(command,args); if(generation!==epoch && command!=='lock_vault' && command!=='app_status') throw new Error('密码库会话已结束，请重新解锁。'); return result; };
-function clearSecrets() { selected=null; history=[]; revealed=false; dialog=null; entries=[]; query=''; completedVerified.clear(); outcomesSeen.clear(); epoch++; }
+function clearSecrets() { selected=null; history=[]; revealed=false; dialog=null; entries=[]; query=''; showUsernames=false; completedVerified.clear(); outcomesSeen.clear(); epoch++; }
 function feedback(message:string,error=false) { notice=message; isError=error; const el=document.querySelector('#notice'); if(el){el.textContent=message;el.className=`notice ${error?'error':''}`;} }
 async function run(action:()=>Promise<void>) { if(busy)return;busy=true;setBusy(true);try{await action();}catch(error){feedback(String(error),true);}finally{busy=false;setBusy(false);} }
 function setBusy(value:boolean) { document.querySelectorAll<HTMLButtonElement>('button:not([data-action="lock"]):not([data-action="close"])').forEach(el=>el.disabled=value||el.dataset.unavailable==='true');root.setAttribute('aria-busy',String(value)); }
@@ -79,13 +80,14 @@ function renderGate() {
  document.querySelector('#gate-form')?.addEventListener('submit',event=>{event.preventDefault();void run(async()=>{
   const form=event.currentTarget as HTMLFormElement;const data=new FormData(form);let password=String(data.get('password')??'');let confirm=String(data.get('confirm')??'');const name=String(data.get('device_name')??'');
   if(create&&password!==confirm){feedback('两次输入的主密码不一致',true);return;}
-  form.reset();try{await api(create?'create_vault':'unlock_vault',{password,deviceName:name});notice='';await refresh();}finally{password='';confirm='';data.delete('password');data.delete('confirm');}
+  form.reset();try{await api(create?'create_vault':'unlock_vault',{password,deviceName:name});clearSecrets();notice='';await refresh();}finally{password='';confirm='';data.delete('password');data.delete('confirm');}
  });});setBusy(busy);
 }
 function vaultView(){
  const visible=entries.filter(e=>`${e.title} ${e.hostname} ${e.username}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
- return `<div class="toolbar"><label class="search"><span>⌕</span><input id="search" aria-label="搜索密码" placeholder="搜索网站、名称或账号" value="${esc(query)}" autocomplete="off"></label><span class="count">${entries.length} 项</span></div><section class="entries" aria-label="密码列表">${visible.length?visible.map(e=>`<button class="entry" data-entry="${esc(e.id)}"><span class="site-icon">${esc((e.title||e.hostname).slice(0,1).toUpperCase())}</span><span class="entry-copy"><strong>${esc(e.title||e.hostname)}</strong><small>${esc(e.hostname)} · ${esc(e.username||'未填写账号')}</small></span><span class="entry-date">${e.version.modified_at?esc(when(e.version.modified_at)):'••••••••'}</span><span aria-hidden="true">›</span></button>`).join(''):`<div class="empty"><span>◇</span><h2>${query?'没有匹配的密码':'从第一条密码开始'}</h2><p>${query?'试试网站名或账号。':'手动添加，或连接浏览器后保存登录信息。'}</p>${query?'':'<button data-action="new" class="secondary">新增密码</button>'}</div>`}</section><p class="hint">网站账号按完整 hostname 精确匹配。修改仅保存在本机；检测到另一台设备后，可手动合并密码本。</p>`;
+ return `<div class="toolbar"><label class="search"><span>⌕</span><input id="search" aria-label="搜索密码" placeholder="搜索网站、名称或账号" value="${esc(query)}" autocomplete="off"></label><label class="account-toggle"><input id="show-usernames" type="checkbox" role="switch" ${showUsernames?'checked':''}><span>账号明文显示</span></label><span class="count">${entries.length} 项</span></div><section class="entries" aria-label="密码列表">${visible.length?visible.map(e=>`<button class="entry" data-entry="${esc(e.id)}"><span class="site-icon">${esc((e.title||e.hostname).slice(0,1).toUpperCase())}</span><span class="entry-copy"><strong>${esc(e.title||e.hostname)}</strong><small>${esc(e.hostname)} · <span class="entry-account">${esc(accountText(e))}</span></small></span><span class="entry-date">${e.version.modified_at?esc(when(e.version.modified_at)):'••••••••'}</span><span aria-hidden="true">›</span></button>`).join(''):`<div class="empty"><span>◇</span><h2>${query?'没有匹配的密码':'从第一条密码开始'}</h2><p>${query?'试试网站名或账号。':'手动添加，或连接浏览器后保存登录信息。'}</p>${query?'':'<button data-action="new" class="secondary">新增密码</button>'}</div>`}</section><p class="hint">网站账号按主域名匹配，同一主域下的登录页面可使用已保存账号。修改仅保存在本机；检测到另一台设备后，可手动合并密码本。</p>`;
 }
+const accountText = (entry:EntrySummary) => showUsernames ? entry.username||'未填写账号' : '账号已隐藏';
 function devicesView(){
  const service=status!.service;
  const available=service?.running===true;
@@ -108,6 +110,14 @@ function dialogView(){
 }
 function bind(){
  document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(el=>el.addEventListener('click',()=>{selected=null;tab=el.dataset.tab as typeof tab;notice='';render();}));
+ document.querySelector<HTMLInputElement>('#show-usernames')?.addEventListener('change',e=>{
+  showUsernames=(e.currentTarget as HTMLInputElement).checked;
+  const byId=new Map(entries.map(entry=>[entry.id,entry]));
+  document.querySelectorAll<HTMLElement>('[data-entry]').forEach(el=>{
+   const entry=byId.get(el.dataset.entry!);const account=el.querySelector('.entry-account');
+   if(entry&&account)account.textContent=accountText(entry);
+  });
+ });
  document.querySelector('#search')?.addEventListener('input',e=>{const el=e.target as HTMLInputElement;query=el.value;const start=el.selectionStart;render();const next=document.querySelector<HTMLInputElement>('#search');next?.focus();if(start!==null)next?.setSelectionRange(start,start);});
  document.querySelectorAll<HTMLButtonElement>('[data-entry]').forEach(el=>el.addEventListener('click',()=>void run(async()=>{selected=await api<Entry>('get_entry',{id:el.dataset.entry});revealed=false;dialog='entry';render();})));
  document.querySelectorAll<HTMLButtonElement>('[data-merge-device]').forEach(el=>el.addEventListener('click',()=>void run(async()=>{

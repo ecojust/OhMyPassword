@@ -4,8 +4,9 @@ import { readFile } from 'node:fs/promises';
 import { createHash, createPublicKey } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { websiteFromUrl, checkedPort, checkedConnection, sameWebsite, validateEntries, canFillWebsite, credentialForSave } from '../src/lib/model.js';
-import { readConnection, request, saveConnection, searchCredentials } from '../src/lib/client.js';
-import { fillInPage, fillSelectedEntry } from '../src/lib/fill.js';
+import { readConnection, request, saveConnection, searchCredentials, searchWebsiteCredentials } from '../src/lib/client.js';
+import { fillSelectedEntry } from '../src/lib/fill.js';
+import { loginPageOperation } from '../src/lib/login-page.js';
 
 test('website matching normalizes hostname and rejects non-web pages and URL credentials', () => {
   assert.deepEqual(websiteFromUrl('https://EXAMPLE.com:8443/login?q=1'), { hostname: 'example.com', origin: 'https://example.com:8443' });
@@ -56,6 +57,95 @@ test('credential search sends hostname only in JSON POST body without authentica
   assert.equal(captured.options.headers['Content-Type'], 'application/json');
   assert.equal(captured.options.headers.Authorization, undefined);
   assert.equal(captured.options.headers.Origin, undefined);
+});
+
+function account(id, hostname) {
+  return { id, hostname, title: 'Test account', username: 'alice', password: 'test-only-password' };
+}
+
+test('official Google lookup queries only its current host and fixed aliases and deduplicates IDs', async () => {
+  const calls = [];
+  const shared = account('shared', 'accounts.google.com');
+  const gmail = account('gmail', 'gmail.com');
+  const google = account('google', 'google.com');
+  const entriesByHost = {
+    'accounts.google.com': [shared],
+    'gmail.com': [gmail, shared],
+    'google.com': [google, shared],
+  };
+  const result = await searchWebsiteCredentials(undefined, 'accounts.google.com', {}, async (url, options) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({ entries: entriesByHost[JSON.parse(options.body).hostname] }));
+  });
+  assert.deepEqual(calls.map(call => JSON.parse(call.options.body).hostname), ['accounts.google.com', 'gmail.com', 'google.com']);
+  for (const { url, options } of calls) {
+    assert.equal(url, 'http://127.0.0.1:17841/v1/credentials/search');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.headers.Authorization, undefined);
+  }
+  assert.deepEqual(result.entries, [shared, gmail, google]);
+});
+
+test('OpenAI login aliases include ChatGPT but never Google or Apple accounts', async () => {
+  const hosts = [];
+  const openai = account('openai', 'auth.openai.com');
+  const chatgpt = account('chatgpt', 'chatgpt.com');
+  const result = await searchWebsiteCredentials(undefined, 'auth.openai.com', {}, async (_url, options) => {
+    hosts.push(JSON.parse(options.body).hostname);
+    return new Response(JSON.stringify({ entries: [openai, chatgpt, account('google', 'google.com'), account('gmail', 'gmail.com'), account('apple', 'apple.com')] }));
+  });
+  assert.deepEqual(hosts, ['auth.openai.com', 'chatgpt.com', 'openai.com']);
+  assert.deepEqual(result.entries, [openai, chatgpt]);
+});
+
+test('163 and 126 mail lookups query only their own host and keep accounts isolated', async () => {
+  for (const [host, allowed, other] of [['mail.163.com', '163.com', '126.com'], ['mail.126.com', '126.com', '163.com']]) {
+    const hosts = [];
+    const own = account('own', allowed);
+    const result = await searchWebsiteCredentials(undefined, host, {}, async (_url, options) => {
+      hosts.push(JSON.parse(options.body).hostname);
+      return new Response(JSON.stringify({ entries: [own, account('other-product', other)] }));
+    });
+    assert.deepEqual(hosts, [host]);
+    assert.deepEqual(result.entries, [own]);
+  }
+});
+
+test('a locked or failing alias rejects the whole lookup instead of returning partial accounts', async () => {
+  for (const failedHost of ['accounts.google.com', 'gmail.com', 'google.com']) {
+    for (const status of [423, 500]) {
+      await assert.rejects(searchWebsiteCredentials(undefined, 'accounts.google.com', {}, async (_url, options) => {
+        const hostname = JSON.parse(options.body).hostname;
+        return hostname === failedHost
+          ? new Response(JSON.stringify({ message: 'test-only-server-failure' }), { status })
+          : new Response(JSON.stringify({ entries: [account(hostname, 'google.com')] }));
+      }), status === 423 ? /已锁定/ : /test-only-server-failure/);
+    }
+  }
+});
+
+test('alias lookup rejects invalid payloads and individual or combined response limits', async () => {
+  for (const payload of ['not-json', 'null', '{}', '{"entries":null}', JSON.stringify({ entries: Array.from({ length: 2001 }, (_, index) => account(`many-${index}`, 'gmail.com')) })]) {
+    await assert.rejects(searchWebsiteCredentials(undefined, 'accounts.google.com', {}, async (_url, options) => {
+      return new Response(JSON.parse(options.body).hostname === 'gmail.com'
+        ? payload : JSON.stringify({ entries: [account('valid', 'google.com')] }));
+    }), /不支持/);
+  }
+  await assert.rejects(searchWebsiteCredentials(undefined, 'accounts.google.com', {}, async (_url, options) => {
+    const hostname = JSON.parse(options.body).hostname;
+    return new Response(JSON.stringify({ entries: Array.from({ length: 1001 }, (_, index) => account(`${hostname}-${index}`, hostname)) }));
+  }), /过多/);
+  await assert.rejects(searchWebsiteCredentials(undefined, 'accounts.google.com', {}, async (_url, options) => {
+    return new Response(JSON.parse(options.body).hostname === 'gmail.com'
+      ? 'x'.repeat(1048577) : '{"entries":[]}');
+  }), /过大/);
+  let called = false;
+  await assert.rejects(searchWebsiteCredentials(undefined, 'https://evil.example/login', {}, async () => {
+    called = true;
+    return new Response('{"entries":[]}');
+  }), /无效/);
+  assert.equal(called, false);
 });
 
 test('streaming response cap cancels an oversized stream without reading an unbounded body', async () => {
@@ -173,60 +263,39 @@ test('invalid old port settings reset to the safe local default and still remove
   assert.deepEqual(api.data, { connection: { port: 17841 } });
 });
 
-test('fill rechecks tab ID, origin and hostname and targets only main frame', async () => {
-  const target = { id: 42, origin: 'https://example.com', hostname: 'example.com' };
-  let injection;
-  const api = { tabs: { get: async () => ({ id: 42, url: 'https://example.com/login' }) }, scripting: { executeScript: async options => { injection = options; return [{ frameId: 0, result: { ok: true } }]; } } };
-  const entry = { hostname: 'example.com', username: 'alice', password: 'test-only-password' };
-  await fillSelectedEntry(api, target, entry);
-  assert.deepEqual(injection.target, { tabId: 42, frameIds: [0] });
-  assert.equal(injection.world, 'ISOLATED');
-  assert.equal(sameWebsite(target, { id: 99, url: 'https://example.com' }), false);
-  for (const url of ['https://evil.test', 'https://sub.example.com', 'http://example.com', 'https://example.com:8443']) {
-    api.tabs.get = async () => ({ id: 42, url }); injection = undefined;
-    await assert.rejects(fillSelectedEntry(api, target, entry), /跳转/);
-    assert.equal(injection, undefined);
-  }
-});
-
-test('a matching sibling-subdomain credential fills only the unchanged current tab', async () => {
+test('tab identity stays exact even when credential lookup groups sibling domains', () => {
   const target = { id: 42, origin: 'https://login.example.co.uk', hostname: 'login.example.co.uk' };
-  const entry = { hostname: 'accounts.example.co.uk', username: 'alice', password: 'test-only-password' };
-  let injection;
-  const api = { tabs: { get: async () => ({ id: 42, url: 'https://login.example.co.uk/sign-in' }) }, scripting: { executeScript: async options => { injection = options; return [{ frameId: 0, result: { ok: true } }]; } } };
-  await fillSelectedEntry(api, target, entry);
-  assert.deepEqual(injection.args, [target.origin, target.hostname, entry.username, entry.password]);
-  for (const hostname of ['other.co.uk', 'example.co.uk.evil.com']) {
-    injection = undefined;
-    await assert.rejects(fillSelectedEntry(api, target, { ...entry, hostname }), /不属于/);
-    assert.equal(injection, undefined);
-  }
+  assert.equal(sameWebsite(target, { id: 42, url: 'https://login.example.co.uk/sign-in' }), true);
+  assert.equal(sameWebsite(target, { id: 99, url: 'https://login.example.co.uk/sign-in' }), false);
   for (const url of ['https://accounts.example.co.uk', 'https://example.co.uk', 'http://login.example.co.uk', 'https://login.example.co.uk:8443']) {
-    injection = undefined;
-    api.tabs.get = async () => ({ id: 42, url });
-    await assert.rejects(fillSelectedEntry(api, target, entry), /跳转/);
-    assert.equal(injection, undefined);
+    assert.equal(sameWebsite(target, { id: 42, url }), false);
   }
 });
 
-test('the injected fill function rejects same-domain navigation after the tab recheck before touching the page', () => {
-  const target = { origin: 'https://login.example.com', hostname: 'login.example.com' };
-  for (const url of ['https://accounts.example.com', 'https://example.com', 'https://login.example.com:8443', 'http://login.example.com']) {
-    const location = new URL(url);
-    const result = runInNewContext(`(${fillInPage.toString()})(...args)`, {
-      location,
-      args: [target.origin, target.hostname, 'alice', 'test-only-password'],
-      // Any DOM access before rejecting a navigation would fail the test.
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.reason, /跳转/);
+test('the serialized page operation rejects navigation before accessing the DOM', () => {
+  const target = { origin: 'https://login.example.com', hostname: 'login.example.com', url: 'https://login.example.com/login' };
+  for (const url of ['https://accounts.example.com', 'https://example.com', 'https://login.example.com:8443', 'http://login.example.com', 'https://login.example.com/changed']) {
+    for (const mode of ['probe', 'fill', 'frame-check']) {
+      const result = runInNewContext(`(${loginPageOperation.toString()})(request)`, {
+        location: new URL(url),
+        request: { mode, nonce: 'test-only-nonce', expectedOrigin: target.origin, expectedHostname: target.hostname, expectedUrl: target.url },
+        // Any DOM access before rejecting a navigation would fail the test.
+      });
+      assert.equal(result.ok, false);
+      assert.match(result.reason, /跳转/);
+    }
   }
 });
 
-test('manifest grants activeTab and loopback only, no all-sites access or content scripts', async () => {
+test('manifest keeps permanent access limited and offers only three exact login-frame origins', async () => {
   const manifest = JSON.parse(await readFile(new URL('../src/manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(manifest.permissions, ['activeTab', 'scripting', 'storage']);
   assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
+  assert.deepEqual(manifest.optional_host_permissions, [
+    'https://dl.reg.163.com/*',
+    'https://passport.126.com/*',
+    'https://idmsa.apple.com/*',
+  ]);
   assert.equal(manifest.content_scripts, undefined);
   assert.equal(manifest.manifest_version, 3);
 });
