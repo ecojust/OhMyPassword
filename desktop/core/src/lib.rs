@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
@@ -429,11 +430,15 @@ impl Vault {
 
     pub fn list(&self, hostname: Option<&str>) -> Result<Vec<EntrySummary>> {
         let data = &self.current()?.data;
-        let hostname = hostname.map(normalize_hostname).transpose()?;
+        let domain = hostname.map(matching_domain).transpose()?;
         let mut entries = Vec::new();
         for revisions in data.records.values() {
             if let Some(entry) = revisions.last() {
-                if !entry.deleted && hostname.as_ref().is_none_or(|h| h == &entry.hostname) {
+                if !entry.deleted
+                    && domain
+                        .as_deref()
+                        .is_none_or(|key| matching_domain_normalized(&entry.hostname) == key)
+                {
                     entries.push(EntrySummary {
                         id: entry.id.clone(),
                         hostname: entry.hostname.clone(),
@@ -691,7 +696,8 @@ impl Vault {
     }
 }
 
-/// Normalize an exact hostname. No suffix or registrable-domain matching.
+/// Normalize and retain the complete hostname for storage. Public-suffix
+/// grouping is a separate lookup concern handled by `matching_domain`.
 pub fn normalize_hostname(input: &str) -> Result<String> {
     if input.chars().any(char::is_control) {
         return Err(error("网站地址不能包含控制字符"));
@@ -735,6 +741,31 @@ pub fn normalize_hostname(input: &str) -> Result<String> {
         return Err(error("网站域名无效"));
     }
     Ok(host)
+}
+
+/// Return the account lookup key for a hostname or HTTP(S) URL. Known ICANN
+/// and PRIVATE suffixes use the registrable domain (eTLD+1). IP addresses,
+/// localhost, unknown suffixes and suffix-only names keep their exact host.
+/// This never rewrites a stored entry or combines its record identity.
+pub fn matching_domain(input: &str) -> Result<String> {
+    let hostname = normalize_hostname(input)?;
+    Ok(matching_domain_normalized(&hostname).to_owned())
+}
+
+fn matching_domain_normalized(hostname: &str) -> &str {
+    let address = hostname
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(hostname);
+    if hostname == "localhost" || address.parse::<IpAddr>().is_ok() {
+        return hostname;
+    }
+    // `psl::domain_str` alone also groups unknown suffixes. Require a known
+    // ICANN or PRIVATE rule before broadening an exact-host lookup.
+    psl::domain(hostname.as_bytes())
+        .filter(|domain| domain.suffix().is_known())
+        .and_then(|domain| std::str::from_utf8(domain.as_bytes()).ok())
+        .unwrap_or(hostname)
 }
 
 fn valid_id(value: &str) -> bool {

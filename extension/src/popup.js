@@ -1,4 +1,4 @@
-import { canFillWebsite, sameWebsite, validateEntries, websiteFromUrl } from './lib/model.js';
+import { canFillWebsite, credentialForSave, sameWebsite, validateEntries, websiteFromUrl } from './lib/model.js';
 import { readConnection, request, searchCredentials } from './lib/client.js';
 import { fillSelectedEntry } from './lib/fill.js';
 
@@ -6,7 +6,7 @@ const api = globalThis.browser ?? globalThis.chrome;
 const $ = id => document.getElementById(id);
 let target = null;
 let entries = [];
-let editingId = null;
+let editingEntry = null;
 let controller = null;
 let requestId = 0;
 let busy = false;
@@ -17,7 +17,7 @@ function clearSecrets() {
   $('accounts').replaceChildren();
   $('entry-form').reset();
   $('password').type = 'password';
-  editingId = null;
+  editingEntry = null;
   controller?.abort();
   requestId++;
 }
@@ -26,13 +26,13 @@ function closeForm() {
   $('password').type = 'password';
   $('entry-form').hidden = true;
   $('accounts-section').hidden = false;
-  editingId = null;
+  editingEntry = null;
 }
 function showForm(entry = null) {
   closeForm();
-  editingId = entry?.id ?? null;
+  editingEntry = entry;
   $('form-title').textContent = entry ? '修改账号' : '添加账号';
-  $('hostname').value = target.hostname;
+  $('hostname').value = entry?.hostname ?? target.hostname;
   $('title').value = entry?.title ?? '';
   $('username').value = entry?.username ?? '';
   $('password').value = entry?.password ?? '';
@@ -48,8 +48,9 @@ function renderEntries() {
   }
   for (const entry of entries) {
     const card = document.createElement('article'); card.className = 'account';
-    const title = document.createElement('strong'); title.textContent = entry.title || target.hostname;
+    const title = document.createElement('strong'); title.textContent = entry.title || entry.hostname;
     const name = document.createElement('p'); name.className = 'muted'; name.textContent = entry.username || '未填写账号';
+    const source = document.createElement('p'); source.className = 'muted'; source.textContent = `保存网站：${entry.hostname}`;
     const row = document.createElement('div'); row.className = 'row';
     const fill = document.createElement('button'); fill.className = 'primary quiet'; fill.textContent = '填入此页面';
     fill.addEventListener('click', async () => {
@@ -66,7 +67,7 @@ function renderEntries() {
       finally { busy = false; fill.disabled = false; }
     });
     const edit = document.createElement('button'); edit.className = 'quiet'; edit.textContent = '修改'; edit.addEventListener('click', () => showForm(entry));
-    row.append(fill, edit); card.append(title, name, row); $('accounts').append(card);
+    row.append(fill, edit); card.append(title, name, source, row); $('accounts').append(card);
   }
 }
 
@@ -103,12 +104,17 @@ $('entry-form').addEventListener('submit', async event => {
   if (busy || !target) return;
   busy = true; $('save').disabled = true;
   try {
-    if (!sameWebsite(target, await api.tabs.get(target.id))) throw new Error('页面已跳转，账号未保存，请重新打开扩展。');
-    const connection = await readConnection(api);
-    await request(connection, '/v1/credentials', { method: 'POST', body: {
-      id: editingId, hostname: target.hostname, title: $('title').value.trim(),
+    const current = requestId;
+    const saveTarget = target;
+    const body = credentialForSave(saveTarget.hostname, editingEntry, {
+      title: $('title').value,
       username: $('username').value, password: $('password').value, notes: $('notes').value,
-    } });
+    });
+    if (!sameWebsite(saveTarget, await api.tabs.get(saveTarget.id))) throw new Error('页面已跳转，账号未保存，请重新打开扩展。');
+    const connection = await readConnection(api);
+    if (current !== requestId) throw new Error('页面已变化，账号未保存，请重新打开扩展。');
+    await request(connection, '/v1/credentials', { method: 'POST', body });
+    if (current !== requestId) return;
     closeForm(); busy = false; await load(); status('已保存到本机。需要其他设备取得修改时，请在客户端手动合并密码本。', 'success');
   } catch (error) { status(error.message, 'error'); }
   finally { busy = false; $('save').disabled = false; }

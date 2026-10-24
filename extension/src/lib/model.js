@@ -1,3 +1,5 @@
+import { sameCredentialSite } from './domains.js';
+
 export const DEFAULT_PORT = 17841;
 
 export function websiteFromUrl(value) {
@@ -43,7 +45,22 @@ export function validateEntries(payload, hostname) {
   if (!payload || !Array.isArray(payload.entries) || payload.entries.length > 2000) throw new Error('客户端返回了不支持的数据。');
   return payload.entries.filter(entry => {
     if (!entry || entry.deleted || typeof entry.id !== 'string' || typeof entry.hostname !== 'string') return false;
-    if (entry.hostname.toLowerCase().replace(/\.$/, '') !== hostname) return false;
+    if (!sameCredentialSite(entry.hostname, hostname)) return false;
     return ['title', 'username', 'password'].every(key => typeof entry[key] === 'string' && entry[key].length <= 65536);
   });
+}
+
+export function credentialForSave(hostname, entry, fields) {
+  if (!sameCredentialSite(hostname, hostname)) throw new Error('当前网站地址无效。');
+  if (entry && (typeof entry.id !== 'string' || !entry.id || !sameCredentialSite(entry.hostname, hostname))) {
+    throw new Error('此账号不属于当前网站，未保存修改。');
+  }
+  return {
+    id: entry?.id ?? null,
+    hostname: entry?.hostname ?? hostname,
+    title: fields.title.trim(),
+    username: fields.username,
+    password: fields.password,
+    notes: fields.notes,
+  };
 }

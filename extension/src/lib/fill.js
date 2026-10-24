@@ -1,4 +1,5 @@
 import { canFillWebsite, sameWebsite } from './model.js';
+import { sameCredentialSite } from './domains.js';
 
 // Serialized into the isolated world in the main frame. Keep dependencies inside.
 export function fillInPage(expectedOrigin, expectedHostname, username, password) {
@@ -36,7 +37,7 @@ export function fillInPage(expectedOrigin, expectedHostname, username, password)
 
 export async function fillSelectedEntry(api, target, entry) {
   if (!canFillWebsite(target)) throw new Error('此页面使用未加密的 HTTP，请切换到 HTTPS 后填充。');
-  if (entry.hostname.toLowerCase().replace(/\.$/, '') !== target.hostname) throw new Error('此账号不属于当前网站。');
+  if (!sameCredentialSite(entry.hostname, target.hostname)) throw new Error('此账号不属于当前网站。');
   const tab = await api.tabs.get(target.id);
   if (!sameWebsite(target, tab)) throw new Error('页面已跳转，请重新打开扩展后选择账号。');
   const results = await api.scripting.executeScript({

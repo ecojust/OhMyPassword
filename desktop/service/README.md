@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `GET /v1/status` | 无凭据 | `{protocol:2, initialized, locked}`，不含库内容 |
 | `POST /v1/browser/connect` | 官方插件 Origin | `{connected:true, protocol:2}` |
-| `POST /v1/credentials/search` | JSON `{hostname}` | `{entries:[…]}`，精确 hostname 匹配 |
+| `POST /v1/credentials/search` | JSON `{hostname}` | `{entries:[…]}`，按可注册主域名匹配，保留每条记录的完整 hostname |
 | `POST /v1/credentials` | JSON `EntryInput` | `{entry:…}`，只保存本机 |
 
 路径保留 `/v1` 供插件调用，但响应明确标识协议 2。Chromium 扩展的跨域 GET 可能省略 Origin，因此插件使用 POST 搜索；兼容 GET 搜索仍严格要求 Origin。接口不需要 `Authorization`，预检只允许 `Content-Type`；所有响应禁止缓存。公开状态接口可供插件区分“服务未运行”和“密码库已锁定”。

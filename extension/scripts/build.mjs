@@ -2,6 +2,7 @@ import { readdir, readFile, writeFile, mkdir, rm, cp } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
+import { build } from 'esbuild';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
@@ -11,6 +12,14 @@ const output = path.join(root, 'dist');
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await cp(path.join(root, 'src'), output, { recursive: true });
+// Only the domain helper needs bundling. No remote scripts or runtime lookup.
+await build({
+  entryPoints: [path.join(root, 'src/lib/domains.js')],
+  outfile: path.join(output, 'lib/domains.js'),
+  bundle: true, format: 'esm', platform: 'browser', target: 'chrome109',
+  minify: true, legalComments: 'eof',
+});
+await cp(path.join(root, '../node_modules/tldts/LICENSE'), path.join(output, 'THIRD-PARTY-LICENSES.txt'));
 
 async function files(folder, prefix = '') {
   const result = [];

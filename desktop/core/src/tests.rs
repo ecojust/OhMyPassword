@@ -127,7 +127,7 @@ fn locking_rejects_all_secret_access_and_sync() {
 }
 
 #[test]
-fn hostname_normalization_is_exact_and_rejects_ambiguous_inputs() {
+fn hostname_normalization_retains_full_host_and_rejects_ambiguous_inputs() {
     assert_eq!(
         normalize_hostname("https://EXAMPLE.com.:443/path?a=b").unwrap(),
         "example.com"
@@ -166,13 +166,164 @@ fn hostname_normalization_is_exact_and_rejects_ambiguous_inputs() {
         .unwrap();
     assert_eq!(
         vault.list(Some("https://example.com/login")).unwrap().len(),
-        1
+        2
     );
     assert_eq!(vault.list(Some("example.com.evil.test")).unwrap().len(), 1);
-    assert!(vault.list(Some("other.example.com")).unwrap().is_empty());
+    assert_eq!(vault.list(Some("other.example.com")).unwrap().len(), 2);
     let summaries = serde_json::to_string(&vault.list(None).unwrap()).unwrap();
     assert!(!summaries.contains("\"password\""));
     assert!(!summaries.contains("\"notes\""));
+}
+
+#[test]
+fn matching_domain_agrees_with_shared_browser_fixtures() {
+    #[derive(Deserialize)]
+    struct Case {
+        hostname: String,
+        key: Option<String>,
+    }
+    let cases: Vec<Case> =
+        serde_json::from_str(include_str!("../testdata/domain-matches.json")).unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        assert_eq!(
+            matching_domain(&case.hostname).ok(),
+            case.key,
+            "shared hostname: {}",
+            case.hostname
+        );
+    }
+}
+
+#[test]
+fn matching_domain_respects_icann_private_wildcard_and_exception_rules() {
+    for (host, expected) in [
+        ("login.account.example.com", "example.com"),
+        (
+            "https://LOGIN.example.co.uk.:8443/auth?x=1",
+            "example.co.uk",
+        ),
+        ("api.example.com.cn", "example.com.cn"),
+        ("alice.github.io", "alice.github.io"),
+        ("login.alice.github.io", "alice.github.io"),
+        ("bob.github.io", "bob.github.io"),
+        ("login.one.appspot.com", "one.appspot.com"),
+        ("two.appspot.com", "two.appspot.com"),
+        ("a.b.ck", "a.b.ck"),
+        ("sub.a.b.ck", "a.b.ck"),
+        ("b.ck", "b.ck"),
+        ("www.ck", "www.ck"),
+        ("login.www.ck", "www.ck"),
+        ("foo.city.kawasaki.jp", "city.kawasaki.jp"),
+        ("LOGIN.BÜCHER.DE.", "xn--bcher-kva.de"),
+        ("www.食狮.公司.cn", "xn--85x722f.xn--55qx5d.cn"),
+    ] {
+        assert_eq!(matching_domain(host).unwrap(), expected, "host: {host}");
+    }
+}
+
+#[test]
+fn matching_domain_keeps_ip_local_unknown_and_suffix_only_hosts_exact() {
+    for (host, expected) in [
+        ("localhost", "localhost"),
+        ("https://localhost:3000/login", "localhost"),
+        ("app.localhost", "app.localhost"),
+        ("printer", "printer"),
+        ("https://127.0.0.1:8443/path", "127.0.0.1"),
+        ("127.0.0.2", "127.0.0.2"),
+        ("https://[2001:db8::1]:443/login", "[2001:db8::1]"),
+        ("[2001:db8::2]", "[2001:db8::2]"),
+        ("account.example.invalid", "account.example.invalid"),
+        ("example.invalid", "example.invalid"),
+        ("foo.corp", "foo.corp"),
+        ("login.foo.corp", "login.foo.corp"),
+        ("com", "com"),
+        ("co.uk", "co.uk"),
+        ("github.io", "github.io"),
+        ("appspot.com", "appspot.com"),
+        ("公司.cn", "xn--55qx5d.cn"),
+    ] {
+        assert_eq!(matching_domain(host).unwrap(), expected, "host: {host}");
+    }
+    for invalid in [
+        "",
+        "*.example.com",
+        "javascript://example.com",
+        "https://user:pass@example.com",
+        "example.com/path",
+        "example..com",
+        "example.com\n",
+        "-bad.example",
+        "exa mple.com",
+    ] {
+        assert!(matching_domain(invalid).is_err(), "invalid host: {invalid}");
+    }
+}
+
+#[test]
+fn domain_lookup_preserves_stored_hosts_ids_and_keeps_tenants_isolated() {
+    let (dir, mut vault) = ready();
+    let mut ids = BTreeMap::new();
+    for host in [
+        "login.example.com",
+        "accounts.example.com",
+        "example.com.evil.com",
+        "alice.github.io",
+        "www.alice.github.io",
+        "bob.github.io",
+        "127.0.0.1",
+        "127.0.0.2",
+        "localhost",
+        "app.localhost",
+        "foo.corp",
+        "login.foo.corp",
+    ] {
+        let entry = vault.upsert(input(host, "test-password")).unwrap();
+        ids.insert(host.to_owned(), entry.id.clone());
+    }
+    let before = fs::read(dir.path().join("vault.json")).unwrap();
+    assert_eq!(vault.list(None).unwrap().len(), ids.len());
+    for (query, expected) in [
+        (
+            "https://api.example.com/profile",
+            vec!["accounts.example.com", "login.example.com"],
+        ),
+        (
+            "example.com",
+            vec!["accounts.example.com", "login.example.com"],
+        ),
+        (
+            "assets.alice.github.io",
+            vec!["alice.github.io", "www.alice.github.io"],
+        ),
+        ("bob.github.io", vec!["bob.github.io"]),
+        ("github.io", Vec::new()),
+        ("com", Vec::new()),
+        ("127.0.0.1", vec!["127.0.0.1"]),
+        ("localhost", vec!["localhost"]),
+        ("app.localhost", vec!["app.localhost"]),
+        ("foo.corp", vec!["foo.corp"]),
+        ("login.foo.corp", vec!["login.foo.corp"]),
+    ] {
+        let results = vault.list(Some(query)).unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|entry| entry.hostname.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "query: {query}"
+        );
+        for entry in results {
+            assert_eq!(&entry.id, ids.get(&entry.hostname).unwrap());
+        }
+    }
+    for (host, id) in &ids {
+        let entry = vault.get(id).unwrap();
+        assert_eq!(&entry.hostname, host);
+        assert_eq!(&entry.id, id);
+    }
+    assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "ohmypassword-core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "Encrypted local vault and convergent sync data for OhMyPassword"
@@ -12,6 +12,9 @@ aes = { version = "0.8", features = ["zeroize"] }
 argon2 = { version = "0.5", features = ["zeroize"] }
 base64 = "0.22"
 fs2 = "0.4"
+# Keep the embedded ICANN + PRIVATE Public Suffix List snapshot deterministic.
+# Same PSL snapshot as extension tldts 7.4.19; update both with shared fixtures.
+psl = "=2.1.243"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

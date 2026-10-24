@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { createHash, createPublicKey } from 'node:crypto';
-import { websiteFromUrl, checkedPort, checkedConnection, sameWebsite, validateEntries, canFillWebsite } from '../src/lib/model.js';
+import { runInNewContext } from 'node:vm';
+import { websiteFromUrl, checkedPort, checkedConnection, sameWebsite, validateEntries, canFillWebsite, credentialForSave } from '../src/lib/model.js';
 import { readConnection, request, saveConnection, searchCredentials } from '../src/lib/client.js';
-import { fillSelectedEntry } from '../src/lib/fill.js';
+import { fillInPage, fillSelectedEntry } from '../src/lib/fill.js';
 
 test('website matching normalizes hostname and rejects non-web pages and URL credentials', () => {
   assert.deepEqual(websiteFromUrl('https://EXAMPLE.com:8443/login?q=1'), { hostname: 'example.com', origin: 'https://example.com:8443' });
@@ -88,10 +89,48 @@ test('HTTP cannot receive passwords saved for its HTTPS hostname', async () => {
   assert.equal(called, false);
 });
 
-test('entry validation rejects deleted and unrelated hosts including subdomains', () => {
+test('entry validation matches the registrable domain but rejects deleted, invalid and unrelated entries', () => {
   const sample = { id: 'id', hostname: 'example.com', title: 'Account', username: 'alice', password: 'test-only-password' };
-  const result = validateEntries({ entries: [sample, { ...sample, hostname: 'sub.example.com' }, { ...sample, deleted: true }, { ...sample, password: null }] }, 'example.com');
-  assert.deepEqual(result, [sample]);
+  const sibling = { ...sample, id: 'sibling', hostname: 'accounts.example.com' };
+  const result = validateEntries({ entries: [sample, sibling, { ...sample, hostname: 'example.net' }, { ...sample, hostname: 'example.com.evil.net' }, { ...sample, deleted: true }, { ...sample, password: null }] }, 'login.example.com');
+  assert.deepEqual(result, [sample, sibling]);
+});
+
+test('credential matching respects multi-label suffixes, private tenants and exact IP or local hosts', () => {
+  const sample = { id: 'id', title: 'Account', username: 'alice', password: 'test-only-password' };
+  for (const [target, allowed, blocked] of [
+    ['login.example.co.uk', ['example.co.uk', 'accounts.example.co.uk'], ['other.co.uk', 'co.uk', 'example.co.uk.evil.com']],
+    ['login.alice.github.io', ['alice.github.io', 'accounts.alice.github.io'], ['bob.github.io', 'login.bob.github.io', 'github.io']],
+    ['login.alice.appspot.com', ['alice.appspot.com'], ['bob.appspot.com', 'appspot.com']],
+    ['192.168.1.5', ['192.168.1.5'], ['192.168.1.6', 'sub.192.168.1.5']],
+    ['[::1]', ['[::1]'], ['[::2]', 'localhost']],
+    ['localhost', ['localhost'], ['sub.localhost', '127.0.0.1']],
+    ['vault.local', ['vault.local'], ['sub.vault.local', 'other.local']],
+  ]) {
+    const valid = allowed.map((hostname, index) => ({ ...sample, id: `allowed-${index}`, hostname }));
+    const invalid = blocked.map((hostname, index) => ({ ...sample, id: `blocked-${index}`, hostname }));
+    assert.deepEqual(validateEntries({ entries: [...valid, ...invalid] }, target), valid, target);
+  }
+});
+
+test('saving a sibling-subdomain account preserves its original hostname and ID while new accounts use the current host', () => {
+  const current = 'login.example.co.uk';
+  const fields = { title: ' New title ', username: 'alice', password: 'test-only-new-password', notes: 'Updated notes', id: 'untrusted-id', hostname: 'untrusted.example.net' };
+  const entry = { id: 'existing-account-id', hostname: 'accounts.example.co.uk', title: 'Old title', username: 'old-name', password: 'test-only-old-password' };
+  assert.deepEqual(credentialForSave(current, entry, fields), {
+    id: entry.id, hostname: entry.hostname, title: 'New title', username: fields.username, password: fields.password, notes: fields.notes,
+  });
+  assert.equal(entry.hostname, 'accounts.example.co.uk');
+  assert.deepEqual(credentialForSave(current, null, fields), {
+    id: null, hostname: current, title: 'New title', username: fields.username, password: fields.password, notes: fields.notes,
+  });
+  for (const hostname of ['other.co.uk', 'example.co.uk.evil.com']) {
+    assert.throws(() => credentialForSave(current, { ...entry, hostname }, fields), /不属于/);
+  }
+  assert.throws(() => credentialForSave('alice.github.io', { ...entry, hostname: 'bob.github.io' }, fields), /不属于/);
+  assert.throws(() => credentialForSave('192.168.1.5', { ...entry, hostname: '192.168.1.6' }, fields), /不属于/);
+  assert.throws(() => credentialForSave(current, { ...entry, id: null }, fields), /不属于/);
+  assert.throws(() => credentialForSave('', null, fields), /无效/);
 });
 
 test('connection storage contains only port, never an old grant or an accidentally supplied password', async () => {
@@ -147,6 +186,40 @@ test('fill rechecks tab ID, origin and hostname and targets only main frame', as
     api.tabs.get = async () => ({ id: 42, url }); injection = undefined;
     await assert.rejects(fillSelectedEntry(api, target, entry), /跳转/);
     assert.equal(injection, undefined);
+  }
+});
+
+test('a matching sibling-subdomain credential fills only the unchanged current tab', async () => {
+  const target = { id: 42, origin: 'https://login.example.co.uk', hostname: 'login.example.co.uk' };
+  const entry = { hostname: 'accounts.example.co.uk', username: 'alice', password: 'test-only-password' };
+  let injection;
+  const api = { tabs: { get: async () => ({ id: 42, url: 'https://login.example.co.uk/sign-in' }) }, scripting: { executeScript: async options => { injection = options; return [{ frameId: 0, result: { ok: true } }]; } } };
+  await fillSelectedEntry(api, target, entry);
+  assert.deepEqual(injection.args, [target.origin, target.hostname, entry.username, entry.password]);
+  for (const hostname of ['other.co.uk', 'example.co.uk.evil.com']) {
+    injection = undefined;
+    await assert.rejects(fillSelectedEntry(api, target, { ...entry, hostname }), /不属于/);
+    assert.equal(injection, undefined);
+  }
+  for (const url of ['https://accounts.example.co.uk', 'https://example.co.uk', 'http://login.example.co.uk', 'https://login.example.co.uk:8443']) {
+    injection = undefined;
+    api.tabs.get = async () => ({ id: 42, url });
+    await assert.rejects(fillSelectedEntry(api, target, entry), /跳转/);
+    assert.equal(injection, undefined);
+  }
+});
+
+test('the injected fill function rejects same-domain navigation after the tab recheck before touching the page', () => {
+  const target = { origin: 'https://login.example.com', hostname: 'login.example.com' };
+  for (const url of ['https://accounts.example.com', 'https://example.com', 'https://login.example.com:8443', 'http://login.example.com']) {
+    const location = new URL(url);
+    const result = runInNewContext(`(${fillInPage.toString()})(...args)`, {
+      location,
+      args: [target.origin, target.hostname, 'alice', 'test-only-password'],
+      // Any DOM access before rejecting a navigation would fail the test.
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /跳转/);
   }
 });
 

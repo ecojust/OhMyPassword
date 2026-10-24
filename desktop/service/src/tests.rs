@@ -147,8 +147,11 @@ fn official_extension_needs_no_token_and_other_origins_remain_blocked() {
             .send()
             .await
             .unwrap();
+        assert_eq!(r.status(), 200);
         let body: serde_json::Value = r.json().await.unwrap();
-        assert_eq!(body["entries"].as_array().unwrap().len(), 0);
+        assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(body["entries"][0]["hostname"], "example.com");
+        assert_eq!(body["entries"][0]["password"], "private-value");
         for other in [
             None,
             Some("https://evil.example"),
@@ -198,6 +201,110 @@ fn official_extension_needs_no_token_and_other_origins_remain_blocked() {
             .await
             .unwrap();
         assert_eq!(r.status(), 423);
+    });
+}
+
+#[test]
+fn browser_search_groups_registrable_domains_and_keeps_private_hosts_isolated() {
+    let (_dir, vault, service) = fixture("Domain matching");
+    let origin = include_str!("browser-origin.txt").trim();
+    runtime().block_on(async {
+        let c = client();
+        let base = service.status().local_endpoint;
+        let search = format!("{base}/v1/credentials/search");
+        for (hostname, password) in [
+            ("example.com", "com-root"),
+            ("login.example.com", "com-login"),
+            ("unrelated.com", "other-com"),
+            ("example.co.uk", "uk-root"),
+            ("login.example.co.uk", "uk-login"),
+            ("unrelated.co.uk", "other-uk"),
+            ("alice.github.io", "alice-root"),
+            ("blog.alice.github.io", "alice-blog"),
+            ("bob.github.io", "bob-root"),
+            ("127.0.0.1", "ipv4-one"),
+            ("127.0.0.2", "ipv4-two"),
+            ("[::1]", "ipv6-one"),
+            ("[::2]", "ipv6-two"),
+            ("localhost", "local-root"),
+            ("app.localhost", "local-app"),
+        ] {
+            let r = c
+                .post(format!("{base}/v1/credentials"))
+                .header("Origin", origin)
+                .json(&entry(hostname, password))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200, "could not save {hostname}");
+        }
+
+        let cases: &[(&str, &[&str])] = &[
+            ("example.com", &["com-root", "com-login"]),
+            ("login.example.com", &["com-root", "com-login"]),
+            ("shop.example.com", &["com-root", "com-login"]),
+            ("unrelated.com", &["other-com"]),
+            ("example.co.uk", &["uk-root", "uk-login"]),
+            ("shop.example.co.uk", &["uk-root", "uk-login"]),
+            ("unrelated.co.uk", &["other-uk"]),
+            ("co.uk", &[]),
+            ("alice.github.io", &["alice-root", "alice-blog"]),
+            ("shop.alice.github.io", &["alice-root", "alice-blog"]),
+            ("bob.github.io", &["bob-root"]),
+            ("github.io", &[]),
+            ("127.0.0.1", &["ipv4-one"]),
+            ("127.0.0.2", &["ipv4-two"]),
+            ("127.0.0.3", &[]),
+            ("[::1]", &["ipv6-one"]),
+            ("[::2]", &["ipv6-two"]),
+            ("[::3]", &[]),
+            ("localhost", &["local-root"]),
+            ("app.localhost", &["local-app"]),
+            ("other.localhost", &[]),
+        ];
+        for (hostname, expected) in cases {
+            let r = c
+                .post(&search)
+                .header("Origin", origin)
+                .json(&serde_json::json!({"hostname":hostname}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200, "could not search {hostname}");
+            let body: serde_json::Value = r.json().await.unwrap();
+            let mut actual: Vec<_> = body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["password"].as_str().unwrap())
+                .collect();
+            let mut expected = expected.to_vec();
+            actual.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(actual, expected, "unexpected matches for {hostname}");
+        }
+
+        // Broadening hostname lookup must not broaden browser authorization.
+        let query = serde_json::json!({"hostname":"shop.example.com"});
+        let r = c
+            .post(&search)
+            .header("Origin", "https://shop.example.com")
+            .json(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        assert!(!r.text().await.unwrap().contains("com-root"));
+        vault.lock().unwrap().lock();
+        let r = c
+            .post(&search)
+            .header("Origin", origin)
+            .json(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 423);
+        assert!(!r.text().await.unwrap().contains("com-root"));
     });
 }
 
