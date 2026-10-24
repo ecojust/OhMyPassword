@@ -1,0 +1,38 @@
+name: Prepare release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release manifest tag
+        required: true
+        default: v0.1.0
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-draft-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify source artifacts and prepare draft
+        run: python .github/scripts/prepare-release.py --manifest ".github/releases/$RELEASE_TAG.json" --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"

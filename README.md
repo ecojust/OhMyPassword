@@ -20,7 +20,7 @@
 
 ## 测试包与大小
 
-桌面、插件和 iOS 模拟器包见 [完整构建](https://github.com/ecojust/OhMyPassword/actions/runs/39995965398)，Android 使用 [优化后的开发构建](https://github.com/ecojust/OhMyPassword/actions/runs/39997614999)。在运行页面底部的 **Artifacts** 下载，需登录 GitHub；测试产物保留 14 天，每组附有 `SHA256SUMS.txt`。
+全部安装包与插件见 [GitHub Release v0.1.0](https://github.com/ecojust/OhMyPassword/releases/tag/v0.1.0)，附统一的 `SHA256SUMS.txt` 和 `BUILD-NOTES.txt`。构建来源与验证范围见 [验证记录](VALIDATION.md)。
 
 | 产物 | 平台 | 实际文件大小 |
 | --- | --- | ---: |
@@ -32,7 +32,7 @@
 | 开发 APK，Rust 代码已优化 | Android ARM64 | 13.45 MiB |
 | 模拟器 App ZIP | iOS ARM64 Simulator | 18.75 MiB |
 
-大小按实际下载文件统计。桌面使用系统 WebView：Windows 需要 WebView2，Linux 需要 GTK / WebKitGTK，macOS 使用系统 WebKit；上述体积不包含系统运行时。移动包均供开发测试，Android 使用开发签名，iOS 模拟器包不能直接安装到 iPhone。下载后先解压 Actions 外层 ZIP；插件还需解压内层 ZIP，并按 [插件说明](extension/README.md) 加载。
+大小按实际下载文件统计。桌面使用系统 WebView：Windows 需要 WebView2，Linux 需要 GTK / WebKitGTK，macOS 使用系统 WebKit；上述体积不包含系统运行时。移动包均供开发测试，Android 使用开发签名，iOS 模拟器包不能直接安装到 iPhone。插件 ZIP 解压后按 [插件说明](extension/README.md) 加载。
 
 ## 使用流程
 

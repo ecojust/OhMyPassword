@@ -70,9 +70,28 @@ processes. The APK retains its debug variant and development signing key; this
 size optimization does not create a production-signed release. Compare actual
 collected APK bytes rather than the outer Actions artifact ZIP size.
 
-CI uploads artifacts without publishing a Release. The APK uses a development
+The build workflow uploads artifacts without publishing a Release. The APK uses a development
 signing key. The iOS archive contains a Simulator `.app`, not an iPhone install
 package; physical-device distribution needs Apple signing and provisioning.
 macOS bundles have ad-hoc signatures and are not Apple-notarized. Desktop
 startup and mobile compilation do not demonstrate real-device LAN discovery,
 pairing or background operation.
+
+## Preparing a GitHub Release
+
+`release.yml` is a separate manual workflow. Its versioned manifest in
+`.github/releases/` identifies the successful build runs, exact artifacts,
+package sizes and SHA256 values. `prepare-release.py` downloads those artifacts
+on the GitHub runner, verifies the package files and their bundled checksums,
+then uploads the seven packages, combined `SHA256SUMS.txt` and `BUILD-NOTES.txt`
+to a draft Release. It also checks the uploaded asset inventory and any SHA256
+digests returned by GitHub. Existing releases with the same tag are left intact.
+
+```sh
+gh workflow run release.yml --ref master -f tag=v0.1.0
+# After verifying the prepared draft and its assets:
+gh release edit v0.1.0 --repo ecojust/OhMyPassword --draft=false --latest
+```
+
+This workflow packages existing verified binaries; it does not rebuild the
+applications or publish the draft automatically.
