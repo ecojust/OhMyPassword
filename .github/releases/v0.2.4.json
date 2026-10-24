@@ -1,0 +1,78 @@
+{
+  "tag": "v0.2.4",
+  "title": "OhMyPassword v0.2.4",
+  "notes_file": ".github/releases/v0.2.4.md",
+  "builds": [
+    {
+      "run_id": 40116497832,
+      "head_sha": "54dd2f1c275e5ceee0655772e1ba270f54a3b80e",
+      "artifacts": [
+        {
+          "name": "ohmypassword-extension",
+          "files": [
+            {
+              "name": "OhMyPassword-0.2.4-extension.zip",
+              "bytes": 70878,
+              "sha256": "ed1842f2936344d75548283363210b6e4f4b2b1dcccac23c11b1f363ec618699"
+            }
+          ]
+        },
+        {
+          "name": "ohmypassword-desktop-windows-x64",
+          "files": [
+            {
+              "name": "OhMyPassword-0.2.4-windows-x64-setup.exe",
+              "bytes": 1937191,
+              "sha256": "63b3e7772ba4f507ffa9e72edbec001c562a1f9cd2fd186e5dd4a4fb7289be02"
+            },
+            {
+              "name": "OhMyPassword-0.2.4-windows-x64-portable.exe",
+              "bytes": 5453312,
+              "sha256": "4e321205c8de7a966e5bf64295165a5d4a3b458dd866417c0453bcd8c60e2640"
+            }
+          ]
+        },
+        {
+          "name": "ohmypassword-desktop-macos-arm64",
+          "files": [
+            {
+              "name": "OhMyPassword-0.2.4-macos-arm64.dmg",
+              "bytes": 2492351,
+              "sha256": "0b6ccc6865378d0c3d70b21bcbf6b515b7913f9b4bb6702354a6bdeda4d39b14"
+            }
+          ]
+        },
+        {
+          "name": "ohmypassword-desktop-linux-x64",
+          "files": [
+            {
+              "name": "OhMyPassword-0.2.4-linux-x64.deb",
+              "bytes": 2866380,
+              "sha256": "f25e087e53df0f2a29d9df6bf32a1523d9a2d2c655a1cd22bb0ab4ee0d34c41b"
+            }
+          ]
+        },
+        {
+          "name": "ohmypassword-ios-arm64-simulator",
+          "files": [
+            {
+              "name": "OhMyPassword-0.2.4-ios-arm64-simulator.zip",
+              "bytes": 21115097,
+              "sha256": "63c56c119357bb54fef496404f06ee2c9d0540836d034aacb91bc4e2464cdbe3"
+            }
+          ]
+        },
+        {
+          "name": "ohmypassword-android-arm64-debug",
+          "files": [
+            {
+              "name": "OhMyPassword-0.2.4-android-arm64-debug.apk",
+              "bytes": 15302247,
+              "sha256": "ed00e0f2b8007f3921e5574a1e31634d7db59d167f55cd94e6cdfb0afb9a310b"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
