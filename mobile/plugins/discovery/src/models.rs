@@ -11,6 +11,8 @@ pub struct DiscoveredPeer {
     pub id: String,
     pub name: String,
     pub endpoint: String,
+    /// Unix milliseconds of the most recent native resolution, not a poll time.
+    pub last_seen: u64,
 }
 #[derive(Default, Deserialize, Serialize)]
 pub struct PeersResponse {

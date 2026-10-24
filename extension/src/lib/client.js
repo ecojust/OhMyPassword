@@ -31,7 +31,7 @@ async function readBoundedBody(response) {
 }
 
 export async function request(connection, path, { method = 'GET', body, signal } = {}, fetcher = fetch) {
-  const { token, port } = checkedConnection(connection);
+  const { port } = checkedConnection(connection);
   if (!/^\/v1\/[a-z/]+(?:\?[^#]*)?$/.test(path)) throw new Error('不支持的客户端接口。');
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 8000);
@@ -41,7 +41,7 @@ export async function request(connection, path, { method = 'GET', body, signal }
   try {
     const response = await fetcher(`http://127.0.0.1:${port}${path}`, {
       method, mode: 'cors', credentials: 'omit', cache: 'no-store', redirect: 'error',
-      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body), signal: abort.signal,
     });
     const text = await readBoundedBody(response);
@@ -73,7 +73,13 @@ export async function request(connection, path, { method = 'GET', body, signal }
 
 export async function readConnection(api) {
   const data = await api.storage.local.get('connection');
-  return checkedConnection(data.connection);
+  let connection;
+  try { connection = checkedConnection(data.connection); }
+  catch { connection = checkedConnection(); }
+  // Rewriting the former {port, token} object removes grants from old versions.
+  // Never propagate unknown stored fields into a request or new settings.
+  await saveConnection(api, connection);
+  return connection;
 }
 
 export function searchCredentials(connection, hostname, { signal } = {}, fetcher = fetch) {
@@ -85,4 +91,5 @@ export async function saveConnection(api, connection) {
   const value = checkedConnection(connection);
   await api.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' });
   await api.storage.local.set({ connection: value });
+  await api.storage.local.remove(['token', 'origin', 'clientId', 'client_id', 'grant']);
 }

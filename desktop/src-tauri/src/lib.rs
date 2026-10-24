@@ -1,7 +1,7 @@
 //! The shared native shell for desktop, Android and iOS. Passwords only cross
 //! this local IPC bridge after an explicit action in the bundled UI.
-use ohmypassword_core::{ClientGrant, ClientInfo, Entry, EntryInput, EntrySummary, Status, Vault};
-use ohmypassword_service::{Invitation, PeerInfo, Service, ServiceConfig, ServiceStatus};
+use ohmypassword_core::{Entry, EntryInput, EntrySummary, Status, Vault};
+use ohmypassword_service::{MergeSession, Service, ServiceConfig, ServiceStatus};
 use serde::Serialize;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -40,13 +40,6 @@ impl AppState {
         self.touch();
         if let Some(service) = &self.service {
             service.resume();
-            service.trigger_sync();
-        }
-    }
-    fn changed(&self) {
-        self.touch();
-        if let Some(service) = &self.service {
-            service.trigger_sync();
         }
     }
 }
@@ -57,12 +50,6 @@ struct AppStatus {
     service_error: Option<String>,
     local_addresses: Vec<String>,
     mobile: bool,
-}
-#[derive(Serialize)]
-struct PublicPeer {
-    device_id: String,
-    name: String,
-    endpoint: String,
 }
 fn local_addresses() -> Vec<String> {
     let mut addresses: Vec<_> = local_ip_address::list_afinet_netifas()
@@ -159,13 +146,13 @@ async fn save_entry(input: EntryInput, state: State<'_, Arc<AppState>>) -> Nativ
         vault.upsert(input).map(|_| ())
     })
     .await?;
-    state.changed();
+    state.touch();
     Ok(())
 }
 #[tauri::command]
 async fn delete_entry(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<()> {
     with_vault(state.inner().clone(), move |vault| vault.delete(&id)).await?;
-    state.changed();
+    state.touch();
     Ok(())
 }
 #[tauri::command]
@@ -174,100 +161,38 @@ async fn entry_history(id: String, state: State<'_, Arc<AppState>>) -> NativeRes
     with_vault(state.inner().clone(), move |vault| vault.get_conflicts(&id)).await
 }
 #[tauri::command]
-async fn list_peers(state: State<'_, Arc<AppState>>) -> NativeResult<Vec<PublicPeer>> {
-    with_vault(state.inner().clone(), |vault| {
-        vault.peers().map(|peers| {
-            peers
-                .into_iter()
-                .map(|peer| PublicPeer {
-                    device_id: peer.device_id.clone(),
-                    name: peer.name.clone(),
-                    endpoint: peer.endpoint.clone(),
-                })
-                .collect()
-        })
-    })
-    .await
-}
-#[tauri::command]
-async fn remove_peer(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<()> {
-    with_vault(state.inner().clone(), move |vault| vault.remove_peer(&id)).await?;
-    state.touch();
-    Ok(())
-}
-#[tauri::command]
-async fn list_clients(state: State<'_, Arc<AppState>>) -> NativeResult<Vec<ClientInfo>> {
-    with_vault(state.inner().clone(), |vault| vault.clients()).await
-}
-#[tauri::command]
-async fn create_client(
-    name: String,
-    origin: String,
-    state: State<'_, Arc<AppState>>,
-) -> NativeResult<ClientGrant> {
-    state.touch();
-    with_vault(state.inner().clone(), move |vault| {
-        vault.create_client(&name, &origin)
-    })
-    .await
-}
-#[tauri::command]
-async fn revoke_client(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<()> {
-    with_vault(state.inner().clone(), move |vault| vault.revoke_client(&id)).await?;
-    state.touch();
-    Ok(())
-}
-#[tauri::command]
-fn create_invitation(ip: String, state: State<'_, Arc<AppState>>) -> NativeResult<Invitation> {
-    state.touch();
-    let service = state
-        .service
-        .as_ref()
-        .ok_or("同步服务未启动，请检查端口是否被占用")?;
-    let ip = ip
-        .parse::<IpAddr>()
-        .map_err(|_| "请输入本机有效的局域网 IP")?;
-    service
-        .create_invitation(ip)
-        .map_err(|error| error.to_string())
-}
-#[tauri::command]
-async fn accept_invitation(
-    code: String,
-    state: State<'_, Arc<AppState>>,
-) -> NativeResult<PeerInfo> {
-    let service = state
-        .service
-        .clone()
-        .ok_or("同步服务未启动，请检查端口是否被占用")?;
-    let code = Zeroizing::new(code);
-    state.touch();
-    tauri::async_runtime::spawn_blocking(move || {
-        service
-            .accept_invitation(&code)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|_| "设备配对未完成".to_owned())?
-}
-#[tauri::command]
-fn sync_now(state: State<'_, Arc<AppState>>) -> NativeResult<()> {
-    if state
-        .vault
-        .lock()
-        .map_err(|_| "密码库暂不可用")?
-        .status()
-        .locked
-    {
-        return Err("请先解锁密码库".into());
-    }
+fn detect_devices(state: State<'_, Arc<AppState>>) -> NativeResult<()> {
     state.touch();
     state
         .service
         .as_ref()
-        .ok_or("同步服务未启动")?
-        .trigger_sync();
-    Ok(())
+        .ok_or("局域网服务未启动")?
+        .detect_devices()
+        .map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn request_merge(device_id: String, state: State<'_, Arc<AppState>>) -> NativeResult<MergeSession> {
+    state.touch();
+    state
+        .service
+        .as_ref()
+        .ok_or("局域网服务未启动")?
+        .request_merge(&device_id)
+        .map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn respond_merge(
+    session_id: String,
+    accept: bool,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<()> {
+    state.touch();
+    state
+        .service
+        .as_ref()
+        .ok_or("局域网服务未启动")?
+        .respond_merge(&session_id, accept)
+        .map_err(|error| error.to_string())
 }
 
 /// Both native wrappers supply their own generated Tauri context.
@@ -314,14 +239,9 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             save_entry,
             delete_entry,
             entry_history,
-            list_peers,
-            remove_peer,
-            list_clients,
-            create_client,
-            revoke_client,
-            create_invitation,
-            accept_invitation,
-            sync_now
+            detect_devices,
+            request_merge,
+            respond_merge
         ])
         .build(context)
         .expect("Could not initialize OhMyPassword");
@@ -350,6 +270,10 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
     let mut discovery_started = false;
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let mut discovery_generation = 0;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let mut scan_generation = None;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let mut seen = std::collections::HashMap::<String, (String, u64)>::new();
     while !state.stopping.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_secs(3));
         let idle = state
@@ -373,11 +297,15 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
                 let _ = app.discovery().stop();
                 discovery_started = false;
                 discovery_generation = generation;
+                scan_generation = None;
+                seen.clear();
             }
             let locked = idle || status.locked;
             if locked && discovery_started {
                 let _ = app.discovery().stop();
                 discovery_started = false;
+                scan_generation = None;
+                seen.clear();
             }
             if !locked {
                 if let Some(service) = &state.service {
@@ -392,12 +320,28 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
                             .is_ok();
                     }
                     if discovery_started {
+                        let discovery_status = service.status();
+                        if discovery_status.discovering
+                            && scan_generation != Some(discovery_status.discovery_generation)
+                            && app.discovery().scan().is_ok()
+                        {
+                            scan_generation = Some(discovery_status.discovery_generation);
+                        }
                         if let Ok(result) = app.discovery().peers() {
+                            let mut present = std::collections::HashSet::new();
                             for peer in result.peers {
-                                if let Ok(endpoint) = peer.endpoint.parse() {
-                                    service.discovered_peer(&peer.id, endpoint);
+                                present.insert(peer.id.clone());
+                                let observation = (peer.endpoint.clone(), peer.last_seen);
+                                // Polling a cached resolution must not keep an offline
+                                // device alive forever in the service discovery cache.
+                                if seen.get(&peer.id) != Some(&observation) {
+                                    if let Ok(endpoint) = peer.endpoint.parse() {
+                                        service.discovered_peer(&peer.id, endpoint);
+                                        seen.insert(peer.id, observation);
+                                    }
                                 }
                             }
+                            seen.retain(|id, _| present.contains(id));
                         }
                     }
                 }

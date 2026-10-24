@@ -16,16 +16,7 @@ export function checkedPort(value = DEFAULT_PORT) {
 }
 
 export function checkedConnection(value) {
-  if (!value || typeof value.token !== 'string' || !value.token.trim() || value.token.length > 1024 || /[\r\n]/.test(value.token)) {
-    throw new Error('请先在连接设置中填写客户端提供的连接令牌。');
-  }
-  return { token: value.token.trim(), port: checkedPort(value.port) };
-}
-
-export function extensionOrigin(api) {
-  const url = new URL(api.runtime.getURL(''));
-  if (!['chrome-extension:', 'moz-extension:'].includes(url.protocol)) throw new Error('只能在浏览器扩展中连接。');
-  return `${url.protocol}//${url.host}`;
+  return { port: checkedPort(value?.port) };
 }
 
 export function sameWebsite(target, current) {
@@ -38,9 +29,9 @@ export function canFillWebsite(site) {
 }
 
 export function readableError(status, payload) {
-  if (status === 401) return '连接令牌无效或已撤销，请重新授权此扩展。';
+  if (status === 401) return '客户端仍使用旧连接协议，请更新客户端和扩展。';
   if (status === 423) return '密码库已锁定，请先在 OhMyPassword 客户端解锁。';
-  if (status === 403) return '客户端尚未授权此扩展标识，请检查连接设置。';
+  if (status === 403) return '客户端拒绝了此浏览器请求，请确认客户端与扩展均为最新版。';
   if (status === 429) return '请求过于频繁，请稍后重试。';
   if (status === 413) return '提交内容过大，请缩短备注后重试。';
   // The local client's error text is displayed only as text, never markup.

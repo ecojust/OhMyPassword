@@ -16,6 +16,9 @@ impl<R: Runtime> Discovery<R> {
     pub fn stop(&self) -> crate::Result<()> {
         Ok(())
     }
+    pub fn scan(&self) -> crate::Result<()> {
+        Ok(())
+    }
     pub fn peers(&self) -> crate::Result<PeersResponse> {
         Ok(PeersResponse::default())
     }

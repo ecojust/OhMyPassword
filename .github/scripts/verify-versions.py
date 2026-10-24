@@ -1,5 +1,7 @@
 """Validate committed version metadata for every application."""
 
+import base64
+import hashlib
 import json
 import re
 import tomllib
@@ -39,5 +41,10 @@ for workspace in ("desktop", "mobile"):
     assert config["version"] == version, config_path
     frontend = (config_path.parent / config["build"]["frontendDist"]).resolve()
     assert frontend == ROOT / "desktop/dist", f"Unexpected frontend path: {frontend}"
-assert read_json("extension/src/manifest.json")["version"] == version
+manifest = read_json("extension/src/manifest.json")
+assert manifest["version"] == version
+public_key = base64.b64decode(manifest["key"], validate=True)
+extension_id = "".join(chr(ord("a") + int(digit, 16)) for digit in hashlib.sha256(public_key).hexdigest()[:32])
+origin = (ROOT / "desktop/service/src/browser-origin.txt").read_text(encoding="utf-8").strip()
+assert origin == f"chrome-extension://{extension_id}", "Extension identity and local service Origin differ"
 print(f"OhMyPassword {version}: workspace, Rust, Tauri and extension versions agree")

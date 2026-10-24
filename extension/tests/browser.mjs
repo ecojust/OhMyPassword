@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const extension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
+const manifest = JSON.parse(await readFile(path.join(extension, 'manifest.json'), 'utf8'));
+const extensionId = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest('hex').slice(0, 32).replace(/[0-9a-f]/g, c => String.fromCharCode(97 + parseInt(c, 16)));
+const expectedOrigin = `chrome-extension://${extensionId}`;
+assert.equal(expectedOrigin, 'chrome-extension://abnlejagphkafpbidkngaemnlfgbpdmb');
 const profile = await mkdtemp(path.join(tmpdir(), 'omp-extension-test-'));
-let authorizedOrigin = '';
-const grant = 'test-only-connection-token-not-a-real-grant';
+let extensionOrigin = '';
 const calls = [];
 let entries = [{ id: 'account-1', hostname: '127.0.0.1', title: '<b>Literal account title</b>', username: 'test-alice', password: 'test-only-secret', notes: '', deleted: false }];
 let locked = false;
@@ -25,24 +29,24 @@ const server = createServer(async (req, res) => {
     }
     res.end(`<!doctype html><html><body><h1>Test login</h1><form id="login"><input id="user" autocomplete="username"><input id="secret" type="password" autocomplete="current-password"><button type="submit">Login</button></form><iframe src="http://localhost:${server.address().port}/frame"></iframe><script>window.submitted=0;window.changes=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submitted++});document.addEventListener('input',()=>window.changes++);</script></body></html>`); return;
   }
-  // Capture request metadata only. Deliberately never log Authorization or request bodies.
+  // Capture request metadata only. Password request bodies are never logged.
   calls.push({ path: url.pathname, query: url.search, method: req.method, origin: req.headers.origin ?? '(absent)' });
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'application/json');
-  if (req.headers.origin !== authorizedOrigin || !authorizedOrigin) {
+  if (req.headers.origin !== extensionOrigin || !extensionOrigin) {
     res.writeHead(403); res.end(JSON.stringify({ error: 'forbidden_origin' })); return;
   }
-  res.setHeader('Access-Control-Allow-Origin', authorizedOrigin);
+  res.setHeader('Access-Control-Allow-Origin', extensionOrigin);
   res.setHeader('Vary', 'Origin');
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
     res.writeHead(204); res.end(); return;
   }
-  if (req.headers.authorization !== `Bearer ${grant}`) { res.writeHead(401); res.end('{}'); return; }
+  if (req.headers.authorization !== undefined) { res.writeHead(400); res.end(JSON.stringify({ message: 'Unexpected authentication header' })); return; }
   if (locked) { res.writeHead(423); res.end('{}'); return; }
-  if (url.pathname === '/v1/browser/connect') { res.end(JSON.stringify({ connected: true, protocol: 1 })); return; }
+  if (url.pathname === '/v1/browser/connect') { res.end(JSON.stringify({ connected: true, protocol: 2 })); return; }
   if (url.pathname === '/v1/credentials/search' && req.method === 'POST') {
     let body = ''; for await (const chunk of req) body += chunk;
     const search = JSON.parse(body);
@@ -68,23 +72,34 @@ try {
     args: ['--no-sandbox', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
   });
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker', { timeout: 20000 });
-  authorizedOrigin = worker.url().replace(/\/background\.js$/, '');
-  assert.match(authorizedOrigin, /^chrome-extension:\/\/[a-p]{32}$/);
+  extensionOrigin = worker.url().replace(/\/background\.js$/, '');
+  assert.equal(extensionOrigin, expectedOrigin, 'Loaded extension identity must match the public manifest key.');
   const page = await context.newPage();
-  await page.goto(`${authorizedOrigin}/options.html`);
-  assert.equal(await page.locator('#origin').inputValue(), authorizedOrigin);
-  await page.locator('#port').fill(String(port));
-  await page.locator('#token').fill(grant);
+  await page.goto(`${extensionOrigin}/options.html`);
+  assert.equal(await page.locator('#token').count(), 0);
+  assert.equal(await page.locator('#origin').count(), 0);
+  const defaults = await page.evaluate(async () => {
+    await chrome.storage.local.clear();
+    return (await import('./lib/client.js')).readConnection(chrome);
+  });
+  assert.deepEqual(defaults, { port: 17841 });
+  console.log('PASS: a fresh extension has a working default port without token or origin setup.');
+  await page.evaluate(async port => {
+    await chrome.storage.local.set({ connection: { port, token: 'legacy-test-only-grant', origin: 'old-origin' }, token: 'legacy-test-only-grant', origin: 'old-origin' });
+  }, port);
+  await page.reload();
+  await page.waitForFunction(port => Number(document.getElementById('port').value) === port, port);
+  assert.deepEqual(await page.evaluate(() => chrome.storage.local.get(null)), { connection: { port } });
+  console.log('PASS: updating the extension removes legacy grants and preserves its custom local port.');
   await page.locator('#connect').click();
   await page.waitForFunction(() => !document.getElementById('connect').disabled);
   const postCall = calls.find(call => call.path === '/v1/browser/connect' && call.method === 'POST');
   assert.ok(postCall, 'Extension never reached the local POST endpoint; check extension load and network permissions.');
-  assert.equal(postCall.origin, authorizedOrigin, `Real Chromium POST Origin was ${postCall.origin}`);
+  assert.equal(postCall.origin, extensionOrigin, `Real Chromium POST Origin was ${postCall.origin}`);
   assert.match(await page.locator('#status').innerText(), /连接成功/);
-  assert.equal(await page.locator('#token').inputValue(), '');
   const storage = await page.evaluate(() => chrome.storage.local.get(null));
-  assert.deepEqual(storage, { connection: { port, token: grant } });
-  console.log('PASS: real Chromium extension POST includes its Origin and stores only the connection grant.');
+  assert.deepEqual(storage, { connection: { port } });
+  console.log('PASS: real Chromium extension POST connects without Authorization and stores only its local port.');
 
   const lookup = await page.evaluate(async () => {
     const { searchCredentials, readConnection } = await import('./lib/client.js');
@@ -93,11 +108,11 @@ try {
   });
   const searchCall = calls.find(call => call.path === '/v1/credentials/search' && call.method === 'POST');
   assert.ok(searchCall, 'Extension never reached local POST search endpoint.');
-  assert.equal(searchCall.origin, authorizedOrigin, `Real Chromium search POST Origin was ${searchCall.origin}; client/server protocol must be corrected before shipping.`);
+  assert.equal(searchCall.origin, extensionOrigin, `Real Chromium search POST Origin was ${searchCall.origin}; client/server protocol must be corrected before shipping.`);
   assert.equal(searchCall.query, '', 'Credential search must not expose the hostname in the request URL.');
   assert.equal(lookup.ok, true, lookup.message);
   assert.equal(lookup.result.entries.length, 1);
-  console.log('PASS: real Chromium search POST includes its authorized Origin and keeps hostname out of the URL.');
+  console.log('PASS: real Chromium search POST sends its Origin, needs no token and keeps hostname out of the URL.');
 
   const site = await context.newPage();
   await site.goto(`http://127.0.0.1:${port}/login`);

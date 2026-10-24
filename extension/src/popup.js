@@ -1,4 +1,4 @@
-import { canFillWebsite, extensionOrigin, sameWebsite, validateEntries, websiteFromUrl } from './lib/model.js';
+import { canFillWebsite, sameWebsite, validateEntries, websiteFromUrl } from './lib/model.js';
 import { readConnection, request, searchCredentials } from './lib/client.js';
 import { fillSelectedEntry } from './lib/fill.js';
 
@@ -55,7 +55,7 @@ function renderEntries() {
     fill.addEventListener('click', async () => {
       if (busy) return; busy = true; fill.disabled = true;
       try {
-        // Re-fetch immediately: revoked grants, locked vaults and changed passwords must take effect.
+        // Re-fetch immediately: locked vaults and changed passwords must take effect.
         const connection = await readConnection(api);
         const payload = await searchCredentials(connection, target.hostname);
         const latest = validateEntries(payload, target.hostname).find(item => item.id === entry.id);
@@ -84,7 +84,6 @@ async function load() {
     target = { id: tab.id, ...site };
     $('site').textContent = site.hostname;
     const connection = await readConnection(api);
-    extensionOrigin(api);
     const payload = await searchCredentials(connection, site.hostname, { signal: controller.signal });
     if (current !== requestId) return;
     if (!sameWebsite(target, await api.tabs.get(target.id))) throw new Error('页面已跳转，请重新打开扩展。');
@@ -110,7 +109,7 @@ $('entry-form').addEventListener('submit', async event => {
       id: editingId, hostname: target.hostname, title: $('title').value.trim(),
       username: $('username').value, password: $('password').value, notes: $('notes').value,
     } });
-    closeForm(); busy = false; await load(); status('已保存到本机，客户端将同步到已配对的在线设备。', 'success');
+    closeForm(); busy = false; await load(); status('已保存到本机。需要其他设备取得修改时，请在客户端手动合并密码本。', 'success');
   } catch (error) { status(error.message, 'error'); }
   finally { busy = false; $('save').disabled = false; }
 });

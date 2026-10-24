@@ -240,6 +240,10 @@ pub struct Vault {
     device_id: String,
     initialized: bool,
     unlocked: Option<Unlocked>,
+    // A manual merge's final acknowledgement needs a stable record snapshot.
+    // This short-lived lease is deliberately outside the encrypted file so
+    // process exit or vault locking cannot leave a persistent write block.
+    merge_write: Option<String>,
     _lock: File,
 }
 
@@ -281,6 +285,7 @@ impl Vault {
             device_id: identity.device_id,
             initialized,
             unlocked: None,
+            merge_write: None,
             _lock: lock,
         })
     }
@@ -388,8 +393,38 @@ impl Vault {
     }
 
     pub fn lock(&mut self) -> Status {
+        self.merge_write = None;
         self.unlocked = None;
         self.status()
+    }
+
+    /// Freeze record changes while the service finishes a manual merge's
+    /// acknowledgement. The caller must compare the current snapshot and
+    /// obtain this lease under the same external vault mutex.
+    pub fn begin_merge_write(&mut self, id: &str) -> Result<()> {
+        validate_merge_write_id(id)?;
+        self.current()?;
+        match self.merge_write.as_deref() {
+            Some(existing) if existing == id => Ok(()),
+            Some(_) => Err(error("正在确认另一项密码本合并，请稍后重试")),
+            None => {
+                self.merge_write = Some(id.to_owned());
+                Ok(())
+            }
+        }
+    }
+
+    /// Release only the matching merge's write lease. Repeated cleanup is
+    /// harmless, including cleanup after `lock` has already cleared it.
+    pub fn end_merge_write(&mut self, id: &str) -> Result<()> {
+        validate_merge_write_id(id)?;
+        match self.merge_write.as_deref() {
+            Some(existing) if existing != id => Err(error("密码本合并标识不匹配")),
+            _ => {
+                self.merge_write = None;
+                Ok(())
+            }
+        }
     }
 
     pub fn list(&self, hostname: Option<&str>) -> Result<Vec<EntrySummary>> {
@@ -444,6 +479,7 @@ impl Vault {
     }
 
     pub fn upsert(&mut self, input: EntryInput) -> Result<Entry> {
+        self.ensure_record_writes_available()?;
         let mut next = self.current()?.data.clone();
         let id = match &input.id {
             Some(id) if valid_id(id) && next.records.contains_key(id) => id.clone(),
@@ -476,6 +512,7 @@ impl Vault {
     }
 
     pub fn delete(&mut self, id: &str) -> Result<()> {
+        self.ensure_record_writes_available()?;
         let previous = self.get(id)?;
         let mut next = self.current()?.data.clone();
         next.clock = next
@@ -519,6 +556,7 @@ impl Vault {
     }
 
     pub fn merge_sync(&mut self, payload: SyncPayload) -> Result<MergeResult> {
+        self.ensure_record_writes_available()?;
         if payload.version != FORMAT || payload.records.len() > MAX_RECORDS {
             return Err(error("同步数据版本或大小无效"));
         }
@@ -634,6 +672,13 @@ impl Vault {
         self.unlocked.as_ref().ok_or_else(|| error("密码库已锁定"))
     }
 
+    fn ensure_record_writes_available(&self) -> Result<()> {
+        if self.merge_write.is_some() {
+            return Err(error("正在确认密码本合并，请稍后再修改密码"));
+        }
+        Ok(())
+    }
+
     fn commit(&mut self, data: VaultData) -> Result<()> {
         validate_data(&data, &self.device_id)?;
         let current = self.current()?;
@@ -694,6 +739,13 @@ pub fn normalize_hostname(input: &str) -> Result<String> {
 
 fn valid_id(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value)
+}
+
+fn validate_merge_write_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 || id.trim() != id || id.chars().any(char::is_control) {
+        return Err(error("密码本合并标识无效"));
+    }
+    Ok(())
 }
 
 fn now_ms() -> Result<u64> {

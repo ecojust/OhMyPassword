@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { websiteFromUrl, checkedPort, checkedConnection, sameWebsite, extensionOrigin, validateEntries, canFillWebsite } from '../src/lib/model.js';
-import { request, saveConnection, searchCredentials } from '../src/lib/client.js';
+import { createHash, createPublicKey } from 'node:crypto';
+import { websiteFromUrl, checkedPort, checkedConnection, sameWebsite, validateEntries, canFillWebsite } from '../src/lib/model.js';
+import { readConnection, request, saveConnection, searchCredentials } from '../src/lib/client.js';
 import { fillSelectedEntry } from '../src/lib/fill.js';
 
 test('website matching normalizes hostname and rejects non-web pages and URL credentials', () => {
@@ -12,45 +13,39 @@ test('website matching normalizes hostname and rejects non-web pages and URL cre
   for (const url of ['file:///secret', 'chrome://settings', 'javascript:alert(1)', 'https://user:pass@example.com', 'not a url']) assert.equal(websiteFromUrl(url), null);
 });
 
-test('only numeric unprivileged local ports and nonempty single-line tokens are accepted', () => {
+test('only numeric unprivileged local ports are accepted, with a setup-free default', () => {
   assert.equal(checkedPort('17841'), 17841);
   for (const port of ['http://evil.test', '17841/path', '1.5', 0, 80, 65536, NaN]) assert.throws(() => checkedPort(port));
-  assert.throws(() => checkedConnection({ token: 'foo\r\nbar' }));
-  assert.throws(() => checkedConnection({ token: '' }));
-});
-
-test('extension origin uses actual runtime URL including Firefox UUID', () => {
-  assert.equal(extensionOrigin({ runtime: { getURL: () => 'chrome-extension://abcd/' } }), 'chrome-extension://abcd');
-  assert.equal(extensionOrigin({ runtime: { getURL: () => 'moz-extension://browser-uuid/' } }), 'moz-extension://browser-uuid');
-  assert.throws(() => extensionOrigin({ runtime: { getURL: () => 'https://evil.test/' } }));
+  assert.deepEqual(checkedConnection(), { port: 17841 });
+  assert.deepEqual(checkedConnection({ token: 'discard-legacy-token', port: 23456 }), { port: 23456 });
 });
 
 test('request fixes loopback destination, omits cookies, disallows redirects, never fabricates Origin', async () => {
   let captured;
-  const result = await request({ token: 'test-only-grant', port: 17841 }, '/v1/browser/connect', { method: 'POST', body: {} }, async (url, options) => {
+  const result = await request(undefined, '/v1/browser/connect', { method: 'POST', body: {} }, async (url, options) => {
     captured = { url, options };
-    return { ok: true, text: async () => JSON.stringify({ connected: true, protocol: 1 }) };
+    return { ok: true, text: async () => JSON.stringify({ connected: true, protocol: 2 }) };
   });
   assert.equal(result.connected, true);
   assert.equal(captured.url, 'http://127.0.0.1:17841/v1/browser/connect');
   assert.equal(captured.options.redirect, 'error');
   assert.equal(captured.options.mode, 'cors');
   assert.equal(captured.options.credentials, 'omit');
-  assert.equal(captured.options.headers.Authorization, 'Bearer test-only-grant');
+  assert.equal(captured.options.headers.Authorization, undefined);
   assert.equal(captured.options.headers.Origin, undefined);
-  await assert.rejects(request({ token: 'test-only-grant', port: 17841 }, '//evil.test/v1/credentials'), /不支持/);
+  await assert.rejects(request({ port: 17841 }, '//evil.test/v1/credentials'), /不支持/);
 });
 
-test('locked, revoked and oversized client responses fail clearly', async () => {
-  const conn = { token: 'test-only-grant', port: 17841 };
+test('locked, outdated and oversized client responses fail clearly', async () => {
+  const conn = { port: 17841 };
   await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: false, status: 423, text: async () => '{}' })), /已锁定/);
-  await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: false, status: 401, text: async () => '{}' })), /撤销/);
+  await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: false, status: 401, text: async () => '{}' })), /更新/);
   await assert.rejects(searchCredentials(conn, 'example.com', {}, async () => ({ ok: true, text: async () => 'x'.repeat(1048577) })), /过大/);
 });
 
-test('credential search sends hostname only in JSON POST body and preserves authorization', async () => {
+test('credential search sends hostname only in JSON POST body without authentication headers', async () => {
   let captured;
-  await searchCredentials({ token: 'test-only-grant', port: 17841 }, 'login.example.com', {}, async (url, options) => {
+  await searchCredentials({ port: 17841 }, 'login.example.com', {}, async (url, options) => {
     captured = { url, options };
     return new Response('{"entries":[]}');
   });
@@ -58,7 +53,7 @@ test('credential search sends hostname only in JSON POST body and preserves auth
   assert.equal(captured.options.method, 'POST');
   assert.deepEqual(JSON.parse(captured.options.body), { hostname: 'login.example.com' });
   assert.equal(captured.options.headers['Content-Type'], 'application/json');
-  assert.equal(captured.options.headers.Authorization, 'Bearer test-only-grant');
+  assert.equal(captured.options.headers.Authorization, undefined);
   assert.equal(captured.options.headers.Origin, undefined);
 });
 
@@ -68,15 +63,15 @@ test('streaming response cap cancels an oversized stream without reading an unbo
     pull(controller) { controller.enqueue(new Uint8Array(700000)); },
     cancel() { cancelled = true; },
   }));
-  await assert.rejects(searchCredentials({ token: 'test-only-grant', port: 17841 }, 'example.com', {}, async () => response), /过大/);
+  await assert.rejects(searchCredentials({ port: 17841 }, 'example.com', {}, async () => response), /过大/);
   assert.equal(cancelled, true);
 });
 
 test('a locked-vault preflight failure uses only public status to explain the error', async () => {
   const calls = [];
-  await assert.rejects(searchCredentials({ token: 'test-only-grant', port: 17841 }, 'example.com', {}, async (url, options) => {
+  await assert.rejects(searchCredentials({ port: 17841 }, 'example.com', {}, async (url, options) => {
     calls.push({ url, options });
-    if (url.endsWith('/v1/status')) return new Response(JSON.stringify({ protocol: 1, locked: true }));
+    if (url.endsWith('/v1/status')) return new Response(JSON.stringify({ protocol: 2, locked: true }));
     throw new TypeError('Failed to fetch');
   }), /已锁定/);
   assert.equal(calls.length, 2);
@@ -99,12 +94,44 @@ test('entry validation rejects deleted and unrelated hosts including subdomains'
   assert.deepEqual(result, [sample]);
 });
 
-test('connection storage contains only grant and port, never an accidentally supplied password', async () => {
+test('connection storage contains only port, never an old grant or an accidentally supplied password', async () => {
   let stored;
   let access;
-  await saveConnection({ storage: { local: { setAccessLevel: async value => { access = value; }, set: async value => { stored = value; } } } }, { token: 'test-only-grant', port: 17841, password: 'must-not-persist' });
-  assert.deepEqual(stored, { connection: { token: 'test-only-grant', port: 17841 } });
+  let removed;
+  await saveConnection({ storage: { local: { setAccessLevel: async value => { access = value; }, set: async value => { stored = value; }, remove: async value => { removed = value; } } } }, { token: 'legacy-test-only-grant', port: 17841, password: 'must-not-persist' });
+  assert.deepEqual(stored, { connection: { port: 17841 } });
   assert.deepEqual(access, { accessLevel: 'TRUSTED_CONTEXTS' });
+  assert.ok(removed.includes('token'));
+  assert.ok(removed.includes('origin'));
+});
+
+function settingsApi(initial = {}) {
+  const data = structuredClone(initial);
+  return { data, storage: { local: {
+    get: async () => structuredClone(data),
+    set: async value => Object.assign(data, value),
+    remove: async keys => keys.forEach(key => delete data[key]),
+    setAccessLevel: async () => {},
+  } } };
+}
+
+test('first use defaults to port 17841 without any saved connection setup', async () => {
+  const api = settingsApi();
+  assert.deepEqual(await readConnection(api), { port: 17841 });
+  assert.deepEqual(api.data, { connection: { port: 17841 } });
+});
+
+test('migration removes old tokens and origin metadata while preserving a valid custom port', async () => {
+  const api = settingsApi({ connection: { port: 23456, token: 'legacy-secret', origin: 'old-extension' }, token: 'legacy-secret', origin: 'old-extension', clientId: 'old-id', client_id: 'old-id', grant: 'legacy-secret' });
+  assert.deepEqual(await readConnection(api), { port: 23456 });
+  assert.deepEqual(api.data, { connection: { port: 23456 } });
+  assert.equal(JSON.stringify(api.data).includes('legacy-secret'), false);
+});
+
+test('invalid old port settings reset to the safe local default and still remove tokens', async () => {
+  const api = settingsApi({ connection: { port: 'https://outside.example', token: 'legacy-secret' } });
+  assert.deepEqual(await readConnection(api), { port: 17841 });
+  assert.deepEqual(api.data, { connection: { port: 17841 } });
 });
 
 test('fill rechecks tab ID, origin and hostname and targets only main frame', async () => {
@@ -129,4 +156,16 @@ test('manifest grants activeTab and loopback only, no all-sites access or conten
   assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
   assert.equal(manifest.content_scripts, undefined);
   assert.equal(manifest.manifest_version, 3);
+});
+
+test('public manifest key produces the stable Chrome identity used by the client', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../src/manifest.json', import.meta.url), 'utf8'));
+  const der = Buffer.from(manifest.key, 'base64');
+  const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
+  assert.equal(key.asymmetricKeyType, 'rsa');
+  assert.equal(key.asymmetricKeyDetails.modulusLength, 2048);
+  const id = createHash('sha256').update(der).digest('hex').slice(0, 32).replace(/[0-9a-f]/g, c => String.fromCharCode(97 + parseInt(c, 16)));
+  assert.equal(id, 'abnlejagphkafpbidkngaemnlfgbpdmb');
+  const serviceOrigin = (await readFile(new URL('../../desktop/service/src/browser-origin.txt', import.meta.url), 'utf8')).trim();
+  assert.equal(serviceOrigin, `chrome-extension://${id}`);
 });

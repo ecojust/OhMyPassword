@@ -4,10 +4,8 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use hkdf::Hkdf;
 use rand::{rngs::OsRng, RngCore};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::Sha256;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -99,7 +97,7 @@ struct Plain<T> {
 
 fn aad(route: &str, response: bool, env: &Envelope) -> Vec<u8> {
     format!(
-        "ohmypassword/1|{}|{}|{}|{}|{}|{}",
+        "ohmypassword/2|{}|{}|{}|{}|{}|{}",
         if response { "response" } else { "request" },
         route,
         env.from,
@@ -122,7 +120,7 @@ pub(crate) fn seal<T: Serialize>(
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
     let mut env = Envelope {
-        version: 1,
+        version: 2,
         from: from.into(),
         to: to.into(),
         request_id: request_id.into(),
@@ -159,7 +157,7 @@ pub(crate) fn open<T: DeserializeOwned>(
     response: bool,
     env: &Envelope,
 ) -> Result<T> {
-    if env.version != 1
+    if env.version != 2
         || !valid_id(&env.from)
         || !valid_id(&env.to)
         || !valid_id(&env.request_id)
@@ -190,14 +188,6 @@ pub(crate) fn open<T: DeserializeOwned>(
         return Err(Error::Expired);
     }
     Ok(plain.data)
-}
-pub(crate) fn paired_key(invitation_key: &[u8; 32], a: &str, b: &str) -> [u8; 32] {
-    let (a, b) = if a < b { (a, b) } else { (b, a) };
-    let hk = Hkdf::<Sha256>::new(Some(b"OhMyPassword LAN pairing v1"), invitation_key);
-    let mut out = [0; 32];
-    hk.expand(format!("sync|{a}|{b}").as_bytes(), &mut out)
-        .expect("valid HKDF output length");
-    out
 }
 pub(crate) struct ReplayGuard {
     seen: HashMap<(String, String), u64>,
@@ -249,8 +239,6 @@ mod tests {
         changed.ciphertext.push('A');
         assert!(open::<String>(&key, "sync", false, &changed).is_err());
         assert!(open::<String>(&random_key(), "sync", false, &env).is_err());
-        assert_ne!(paired_key(&key, &a, &b), key);
-        assert_eq!(paired_key(&key, &a, &b), paired_key(&key, &b, &a));
     }
     #[test]
     fn replay_cache_rejects_duplicates_and_does_not_evict_live_entries() {

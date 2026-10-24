@@ -31,6 +31,12 @@ impl<R: Runtime> Discovery<R> {
             .map(|_| ())
             .map_err(Into::into)
     }
+    pub fn scan(&self) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("scan", ())
+            .map(|_| ())
+            .map_err(Into::into)
+    }
     pub fn peers(&self) -> crate::Result<PeersResponse> {
         self.0.run_mobile_plugin("peers", ()).map_err(Into::into)
     }

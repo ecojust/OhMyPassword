@@ -457,3 +457,104 @@ fn weak_password_and_oversized_fields_do_not_change_vault() {
     assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
     assert!(vault.list(None).unwrap().is_empty());
 }
+
+#[test]
+fn merge_write_lease_blocks_record_mutations_but_keeps_reads_available() {
+    let (dir, mut vault) = ready();
+    let entry = vault.upsert(input("example.com", "before-ack")).unwrap();
+    let mut incoming = entry.clone();
+    incoming.version.counter += 1;
+    incoming.version.modified_at += 10;
+    incoming.password = "remote-update-during-ack".to_owned();
+    let payload = SyncPayload {
+        version: FORMAT,
+        records: vec![incoming],
+    };
+    let disk_before = fs::read(dir.path().join("vault.json")).unwrap();
+    let snapshot_before = serde_json::to_vec(&vault.export_sync().unwrap()).unwrap();
+
+    vault.begin_merge_write("merge-flight-1").unwrap();
+    vault.begin_merge_write("merge-flight-1").unwrap();
+    assert!(vault.begin_merge_write("merge-flight-2").is_err());
+    assert!(vault.end_merge_write("merge-flight-2").is_err());
+    assert!(vault
+        .upsert(revised(&entry, "local-update-during-ack"))
+        .is_err());
+    assert!(vault.delete(&entry.id).is_err());
+    assert!(vault.merge_sync(payload.clone()).is_err());
+    assert_eq!(vault.get(&entry.id).unwrap().password, "before-ack");
+    assert_eq!(vault.list(Some("example.com")).unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_vec(&vault.export_sync().unwrap()).unwrap(),
+        snapshot_before
+    );
+    assert_eq!(
+        fs::read(dir.path().join("vault.json")).unwrap(),
+        disk_before
+    );
+
+    vault.end_merge_write("merge-flight-1").unwrap();
+    vault.end_merge_write("merge-flight-1").unwrap();
+    assert_eq!(vault.merge_sync(payload).unwrap().changed, 1);
+    assert_eq!(
+        vault.get(&entry.id).unwrap().password,
+        "remote-update-during-ack"
+    );
+    vault
+        .upsert(revised(&entry, "local-update-after-ack"))
+        .unwrap();
+    assert_eq!(
+        vault.get(&entry.id).unwrap().password,
+        "local-update-after-ack"
+    );
+    vault.delete(&entry.id).unwrap();
+    assert!(vault.get(&entry.id).is_err());
+}
+
+#[test]
+fn merge_write_lease_validates_ids_and_lock_clears_the_previous_session() {
+    let (_dir, mut vault) = ready();
+    let entry = vault.upsert(input("example.com", "before-lock")).unwrap();
+    vault.begin_merge_write("previous-session").unwrap();
+    for invalid in [
+        "",
+        " ",
+        " padded",
+        "padded ",
+        "line\nbreak",
+        &"x".repeat(129),
+    ] {
+        assert!(vault.begin_merge_write(invalid).is_err());
+        assert!(vault.end_merge_write(invalid).is_err());
+    }
+    assert!(vault.delete(&entry.id).is_err());
+    vault.lock();
+    assert!(vault.begin_merge_write("while-locked").is_err());
+    vault.end_merge_write("previous-session").unwrap();
+    vault.unlock(PASSWORD).unwrap();
+    vault.upsert(revised(&entry, "after-unlock")).unwrap();
+    vault.begin_merge_write("new-session").unwrap();
+    assert!(vault.end_merge_write("previous-session").is_err());
+    assert!(vault.delete(&entry.id).is_err());
+    vault.end_merge_write("new-session").unwrap();
+    vault.delete(&entry.id).unwrap();
+}
+
+#[test]
+fn merge_write_lease_is_not_persisted_across_process_restarts() {
+    let (dir, mut vault) = ready();
+    let entry = vault
+        .upsert(input("example.com", "before-restart"))
+        .unwrap();
+    let disk_before = fs::read(dir.path().join("vault.json")).unwrap();
+    vault.begin_merge_write("interrupted-ack").unwrap();
+    assert_eq!(
+        fs::read(dir.path().join("vault.json")).unwrap(),
+        disk_before
+    );
+    drop(vault);
+    let mut reopened = Vault::open(dir.path().to_path_buf()).unwrap();
+    reopened.unlock(PASSWORD).unwrap();
+    reopened.upsert(revised(&entry, "after-restart")).unwrap();
+    assert_eq!(reopened.get(&entry.id).unwrap().password, "after-restart");
+}
