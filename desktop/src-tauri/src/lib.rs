@@ -45,6 +45,7 @@ impl AppState {
 }
 #[derive(Serialize)]
 struct AppStatus {
+    app_version: &'static str,
     vault: Status,
     service: Option<ServiceStatus>,
     service_error: Option<String>,
@@ -70,6 +71,7 @@ fn local_addresses() -> Vec<String> {
 fn app_status(state: State<'_, Arc<AppState>>) -> NativeResult<AppStatus> {
     let vault = state.vault.lock().map_err(|_| "密码库暂不可用")?.status();
     Ok(AppStatus {
+        app_version: env!("CARGO_PKG_VERSION"),
         vault,
         service: state.service.as_ref().map(|service| service.status()),
         service_error: state.service_error.clone(),

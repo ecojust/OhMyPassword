@@ -15,6 +15,7 @@ fn fixture_interval(name: &str, interval: u64) -> (tempfile::TempDir, Arc<Mutex<
             local_port: 0,
             lan_port: 0,
             enable_discovery: false,
+            enable_lan_scan: false,
             discovery_interval_secs: interval,
         },
     )
@@ -630,6 +631,7 @@ fn immediate_shutdown_before_runtime_subscription_does_not_hang() {
                         local_port: 0,
                         lan_port: 0,
                         enable_discovery: false,
+                        enable_lan_scan: false,
                         discovery_interval_secs: 300,
                     },
                 )

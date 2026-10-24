@@ -1,10 +1,12 @@
 export interface Version { counter:number; device_id:string; modified_at?:number }
 export interface VaultStatus { initialized:boolean; locked:boolean; device_id:string; device_name:string; entry_count:number; peer_count:number }
-export interface DiscoveredPeer { id:string; name:string; endpoint:string; last_seen:number }
+export interface DiscoveredPeer { id:string; name:string; endpoint:string; last_seen:number; app_version?:string|null }
 export type MergeState = 'waiting'|'awaiting_confirmation'|'merging'|'completed'|'rejected'|'failed'|'expired';
 export interface MergeSession { id:string; peer_id:string; peer_name:string; endpoint:string; direction:'incoming'|'outgoing'; state:MergeState; verification_code:string|null; created_at:number; expires_at:number; completed_at:number|null; error:string|null; received_count?:number|null; changed_count?:number|null; source_count?:number|null }
-export interface ServiceStatus { local_endpoint:string; lan_port:number; running:boolean; last_error:string|null; discovery_generation:number; last_discovery_at:number|null; next_discovery_at:number|null; discovering:boolean; discovery_duration_secs:number; discovery_remaining_secs:number; discovered:DiscoveredPeer[]; merges:MergeSession[] }
-export interface AppStatus { vault:VaultStatus; service:ServiceStatus|null; service_error:string|null; local_addresses:string[]; mobile:boolean }
+export type ScanState = 'idle'|'planning'|'scanning'|'completed'|'cancelled'|'failed'|'disabled';
+export interface IncompatiblePeer extends DiscoveredPeer { protocol:number }
+export interface ServiceStatus { local_endpoint:string; lan_port:number; running:boolean; last_error:string|null; discovery_generation:number; last_discovery_at:number|null; next_discovery_at:number|null; discovering:boolean; discovery_duration_secs:number; discovery_remaining_secs:number; scan_state:ScanState; scan_checked:number; scan_total:number; scan_ranges:string[]; scan_limited:boolean; scan_error:string|null; scan_port:number; incompatible_discovered:IncompatiblePeer[]; discovered:DiscoveredPeer[]; merges:MergeSession[] }
+export interface AppStatus { app_version:string; vault:VaultStatus; service:ServiceStatus|null; service_error:string|null; local_addresses:string[]; mobile:boolean }
 export interface EntrySummary { id:string; hostname:string; title:string; username:string; version:Version; deleted:boolean; conflict_count:number }
 export interface Entry { id:string; hostname:string; title:string; username:string; password:string; notes:string; version:Version; deleted:boolean }
 export interface EntryInput { id:string|null; hostname:string; title:string; username:string; password:string; notes:string }

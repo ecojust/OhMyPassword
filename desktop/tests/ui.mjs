@@ -14,10 +14,10 @@ const fixtureEntry = {id:'record-1',hostname:'example.com',title:'Example',usern
 
 async function mock(page, options={}) {
  await page.addInitScript(({entry,options})=>{
-  const state={initialized:options.initialized!==false,locked:options.locked??false,mobile:options.mobile??false,entries:options.empty?[]:[entry],recovery:options.recovery??[{...entry,password:'previous-fixture-secret'}],restoreError:false,entryCountOverride:null,discovered:options.discovered??[],merges:options.merges??[],discovering:false,discoveryDuration:options.discoveryDuration??20,discoveryRemainingOverride:null,lastDiscovery:null,nextDiscovery:Date.now()/1000+300,discoveryGeneration:0,localAddresses:options.localAddresses??['192.168.1.10'],listError:false,calls:[],delays:{},pending:{},copied:[],events:{}};
+  const state={initialized:options.initialized!==false,locked:options.locked??false,mobile:options.mobile??false,entries:options.empty?[]:[entry],recovery:options.recovery??[{...entry,password:'previous-fixture-secret'}],restoreError:false,entryCountOverride:null,discovered:options.discovered??[],merges:options.merges??[],discovering:false,discoveryDuration:options.discoveryDuration??20,discoveryRemainingOverride:null,lastDiscovery:null,nextDiscovery:Date.now()/1000+300,discoveryGeneration:0,scanState:options.scanState??'idle',scanChecked:options.scanChecked??0,scanTotal:options.scanTotal??0,scanRanges:options.scanRanges??[],scanLimited:options.scanLimited??false,scanError:options.scanError??null,incompatibleDiscovered:options.incompatibleDiscovered??[],localAddresses:options.localAddresses??['192.168.1.10'],listError:false,calls:[],delays:{},pending:{},copied:[],events:{}};
   window.__fixture=state; window.isTauri=true;
   let next=1; const callbacks=new Map();
-  window.__lock=()=>{state.locked=true;state.merges=[];state.discovering=false;state.lastDiscovery=null;callbacks.get(state.events['vault-locked'])?.({event:'vault-locked',id:1,payload:null});};
+  window.__lock=()=>{state.locked=true;state.merges=[];state.discovering=false;state.lastDiscovery=null;state.scanState='cancelled';callbacks.get(state.events['vault-locked'])?.({event:'vault-locked',id:1,payload:null});};
   window.__release=name=>state.pending[name]?.();
   window.__TAURI_INTERNALS__={
    transformCallback(fn){const id=next++;callbacks.set(id,fn);return id;},unregisterCallback(id){callbacks.delete(id);},
@@ -27,7 +27,7 @@ async function mock(page, options={}) {
     if(name==='plugin:event|listen'){state.events[args.event]=args.handler;return next++;}
     if(name==='plugin:event|unlisten')return;
     if(name==='plugin:clipboard-manager|write_text'){state.copied.push(args.text);return;}
-    if(name==='app_status')result={vault:{initialized:state.initialized,locked:state.locked,device_id:'device-1',device_name:'测试电脑',entry_count:state.entryCountOverride??state.entries.length,peer_count:0},service:options.serviceError?null:{local_endpoint:'http://127.0.0.1:17841',lan_port:17842,running:true,last_error:null,discovery_generation:state.discoveryGeneration,last_discovery_at:state.lastDiscovery,next_discovery_at:state.nextDiscovery,discovering:state.discovering,discovery_duration_secs:state.discoveryDuration,discovery_remaining_secs:state.discovering?(state.discoveryRemainingOverride??Math.max(0,state.discoveryDuration-Math.floor(Date.now()/1000-state.lastDiscovery))):0,discovered:state.discovered,merges:state.merges},service_error:options.serviceError?'端口被其他程序占用':null,local_addresses:state.localAddresses,mobile:state.mobile};
+    if(name==='app_status')result={app_version:options.appVersion??'0.2.4',vault:{initialized:state.initialized,locked:state.locked,device_id:'device-1',device_name:'测试电脑',entry_count:state.entryCountOverride??state.entries.length,peer_count:0},service:options.serviceError?null:{local_endpoint:'http://127.0.0.1:17841',lan_port:17842,running:true,last_error:null,discovery_generation:state.discoveryGeneration,last_discovery_at:state.lastDiscovery,next_discovery_at:state.nextDiscovery,discovering:state.discovering,discovery_duration_secs:state.discoveryDuration,discovery_remaining_secs:state.discovering?(state.discoveryRemainingOverride??Math.max(0,state.discoveryDuration-Math.floor(Date.now()/1000-state.lastDiscovery))):0,scan_state:state.scanState,scan_checked:state.scanChecked,scan_total:state.scanTotal,scan_ranges:state.scanRanges,scan_limited:state.scanLimited,scan_error:state.scanError,scan_port:17842,incompatible_discovered:state.incompatibleDiscovered,discovered:state.discovered,merges:state.merges},service_error:options.serviceError?'端口被其他程序占用':null,local_addresses:state.localAddresses,mobile:state.mobile};
     else if(name==='create_vault'||name==='unlock_vault'){if(args.password==='wrong-password')throw '主密码错误';state.initialized=true;state.locked=false;result=null;}
     else if(name==='lock_vault'){window.__lock();result=null;}
     else if(name==='user_activity')return;
@@ -39,7 +39,7 @@ async function mock(page, options={}) {
     else if(name==='restore_entry'){if(state.restoreError)throw '加密备份保存失败，未恢复密码';const historic=state.recovery.find(item=>item.id===args.id&&item.version.counter===args.version.counter);if(!historic)throw '历史版本不存在';const value={...historic,version:{counter:historic.version.counter+1,device_id:'device-1',modified_at:Date.now()}};state.entries=state.entries.filter(item=>item.id!==value.id);state.entries.push(value);result=value;}
     else if(name==='save_entry'){const value={...args.input,id:args.input.id||'new-entry',deleted:false,version:{counter:2,device_id:'device-1',modified_at:Date.now()}};state.entries=state.entries.filter(item=>item.id!==value.id);state.entries.push(value);result=value;}
     else if(name==='delete_entry'){state.entries=state.entries.filter(item=>item.id!==args.id);result=null;}
-    else if(name==='detect_devices'){state.discovering=true;state.discoveryGeneration++;state.lastDiscovery=Date.now()/1000;state.discoveryRemainingOverride=null;result=null;}
+    else if(name==='detect_devices'){state.discovering=true;state.discoveryGeneration++;state.lastDiscovery=Date.now()/1000;state.discoveryRemainingOverride=null;state.scanTotal=options.scanTotal??253;state.scanState=state.scanTotal?'scanning':'planning';state.scanChecked=0;state.scanRanges=options.scanRanges??['192.168.1.0/24'];state.scanLimited=options.scanLimited??false;state.scanError=null;result=null;}
     else if(name==='request_merge'){
      const peer=state.discovered.find(item=>item.id===args.deviceId);if(!peer)throw '设备已离线';
      result={id:'merge-1',peer_id:peer.id,peer_name:peer.name,endpoint:peer.endpoint,direction:'outgoing',state:'waiting',verification_code:'',created_at:Date.now()/1000,expires_at:Date.now()/1000+120,completed_at:null,error:null};state.merges.push(result);
@@ -157,7 +157,7 @@ try{
   await page.evaluate(()=>window.__fixture.entries.push({...window.__fixture.entries[0],id:'remote-entry',title:'来自手机的新密码',hostname:'remote.example.com'}));
   await tick(page);await page.getByText('来自手机的新密码',{exact:true}).waitFor();
  });
- const peer={id:'peer-1',name:'测试手机',endpoint:'http://192.168.1.20:17842',last_seen:Date.now()/1000};
+ const peer={id:'peer-1',name:'测试手机',endpoint:'http://192.168.1.20:17842',last_seen:Date.now()/1000,app_version:'0.2.4'};
  const incoming={id:'incoming-1',peer_id:peer.id,peer_name:peer.name,endpoint:peer.endpoint,direction:'incoming',state:'awaiting_confirmation',verification_code:'123456',created_at:Date.now()/1000,expires_at:Date.now()/1000+120,completed_at:null,error:null};
  await check('device detection is separate from manual password merging',async page=>{
   await page.locator('[data-tab=devices]').click();assert.match(await page.locator('.workspace').innerText(),/每 5 分钟自动检测/);
@@ -166,39 +166,60 @@ try{
   await click(page,'detect');await ready(page);assert.equal(await page.locator('[data-action=detect]').isDisabled(),true);
   assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='detect_devices').length),1);
   assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>c.name==='request_merge')),false);
-  await page.evaluate(peer=>{window.__fixture.discovering=false;window.__fixture.discovered=[peer];},peer);await tick(page);await page.locator('[data-merge-device]').waitFor();
+  await page.evaluate(peer=>{window.__fixture.discovering=false;window.__fixture.scanState='completed';window.__fixture.scanChecked=window.__fixture.scanTotal;window.__fixture.discovered=[peer];},peer);await tick(page);await page.locator('[data-merge-device]').waitFor();
   assert.equal(await page.locator('[data-action=detect]').isDisabled(),false);
  },{});
- await check('discovery countdown advances locally and waits for a confirmed finish before restarting',async page=>{
+ await check('LAN progress follows completed probes and polls status without rereading the vault',async page=>{
   await page.clock.pauseAt(new Date(await page.evaluate(()=>Date.now()+1000)));
   await page.locator('[data-tab=devices]').click();await click(page,'detect');await ready(page);
-  const progress=page.locator('#discovery-progress');assert.equal(await progress.getAttribute('max'),'100');
-  assert.match(await page.locator('#discovery-countdown').innerText(),/剩余 20 秒/);
-  const calls=await page.evaluate(()=>window.__fixture.calls.length);
-  await page.clock.runFor(2100);assert.match(await page.locator('#discovery-countdown').innerText(),/剩余 18 秒/);
-  assert.equal(await page.evaluate(()=>window.__fixture.calls.length),calls,'The one-second animation does not request vault data or any IPC.');
-  assert.ok(Number(await progress.getAttribute('value'))>0);await shot(page,'desktop-discovery-progress');
-  await page.clock.fastForward(20_000);await page.locator('#discovery-countdown').filter({hasText:'等待检测结果'}).waitFor();
-  assert.equal(await page.locator('[data-action=detect]').isDisabled(),true,'Elapsed display time alone cannot declare a successful scan.');
-  await page.evaluate(()=>window.__fixture.discovering=false);await tick(page);await page.waitForFunction(()=>!document.querySelector('[data-action=detect]')?.disabled);
-  assert.equal(await progress.isVisible(),false);assert.equal(await page.locator('#notice').innerText(),'本轮检测已结束。');await click(page,'detect');await ready(page);
-  assert.match(await page.locator('#discovery-countdown').innerText(),/剩余 20 秒/);assert.equal(await page.evaluate(()=>window.__fixture.discoveryGeneration),2);
+  const progress=page.locator('#lan-scan-progress');assert.equal(await progress.getAttribute('max'),'100');
+  assert.match(await page.locator('#lan-scan-count').innerText(),/已检测 0 \/ 253 个地址/);
+  const before=await page.evaluate(()=>({status:window.__fixture.calls.filter(c=>c.name==='app_status').length,list:window.__fixture.calls.filter(c=>c.name==='list_entries').length}));
+  await page.clock.runFor(2100);
+  assert.match(await page.locator('#lan-scan-count').innerText(),/已检测 0 \/ 253 个地址/);assert.equal(Number(await progress.getAttribute('value')),0,'Time passing cannot invent completed probes.');
+  const after=await page.evaluate(()=>({status:window.__fixture.calls.filter(c=>c.name==='app_status').length,list:window.__fixture.calls.filter(c=>c.name==='list_entries').length}));
+  assert.ok(after.status>before.status,'Active device discovery refreshes status.');assert.equal(after.list,before.list,'The one-second status poll does not reread password records.');
+  await page.evaluate(()=>window.__fixture.scanChecked=64);await page.clock.runFor(1100);await page.locator('#lan-scan-count').filter({hasText:'已检测 64 / 253 个地址'}).waitFor();
+  const probePercent=Number(await progress.getAttribute('value'));assert.ok(probePercent>=25&&probePercent<=26);await shot(page,'desktop-discovery-progress');
+  await page.evaluate(()=>window.__fixture.discoveryRemainingOverride=0);await page.clock.fastForward(20_000);
+  assert.equal(Number(await progress.getAttribute('value')),probePercent,'Ending the mDNS window does not complete the LAN probes.');assert.equal(await page.locator('[data-action=detect]').isDisabled(),true);
+  await page.evaluate(()=>{window.__fixture.discovering=false;window.__fixture.scanState='completed';window.__fixture.scanChecked=253;});await tick(page);await page.waitForFunction(()=>!document.querySelector('[data-action=detect]')?.disabled);
+  assert.equal(Number(await progress.getAttribute('value')),100);assert.match(await page.locator('#lan-scan-state').innerText(),/完成/);assert.doesNotMatch(await page.locator('#notice').innerText(),/正在检测/);
+  await click(page,'detect');await ready(page);assert.match(await page.locator('#lan-scan-count').innerText(),/已检测 0 \/ 253 个地址/);assert.equal(await page.evaluate(()=>window.__fixture.discoveryGeneration),2);
   await page.evaluate(()=>window.__fixture.listError=true);await tick(page);await page.locator('#notice').filter({hasText:'密码列表刷新失败'}).waitFor();
-  await page.evaluate(()=>{window.__fixture.listError=false;window.__fixture.discovering=false;});await tick(page);assert.match(await page.locator('#notice').innerText(),/密码列表刷新失败/,'Completing a scan must not replace a later error.');
+  await page.evaluate(()=>{window.__fixture.listError=false;window.__fixture.discovering=false;window.__fixture.scanState='completed';window.__fixture.scanChecked=253;});await tick(page);assert.match(await page.locator('#notice').innerText(),/密码列表刷新失败/,'Completing a scan must not replace a later error.');
  });
- await check('discovery progress clears on navigation and locking without disturbing password fields',async page=>{
+ await check('LAN polling stops offscreen and locked stale replies cannot restore scan details',async page=>{
   await page.clock.pauseAt(new Date(await page.evaluate(()=>Date.now()+1000)));
-  await page.locator('[data-tab=devices]').click();await click(page,'detect');await ready(page);await page.clock.runFor(1100);
+  await page.locator('[data-tab=devices]').click();await click(page,'detect');await ready(page);
+  await page.evaluate(()=>window.__fixture.scanChecked=20);await page.clock.runFor(1100);await page.locator('#lan-scan-count').filter({hasText:'已检测 20 / 253 个地址'}).waitFor();
   await page.locator('[data-tab=vault]').click();await page.locator('#search').fill('Example');
-  await page.evaluate(()=>window.__heldSearch=document.querySelector('#search'));await page.clock.runFor(1100);
-  assert.equal(await page.locator('#discovery-progress').count(),0);assert.equal(await page.locator('#search').inputValue(),'Example');
-  assert.equal(await page.evaluate(()=>window.__heldSearch===document.querySelector('#search')),true,'Countdown ticks must not rerender another screen.');
-  await page.locator('[data-tab=devices]').click();assert.match(await page.locator('#discovery-countdown').innerText(),/剩余 18 秒/);
-  await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();await page.clock.runFor(1100);
-  assert.equal(await page.locator('#discovery-progress,.local-addresses').count(),0);assert.equal(await page.getByText('正在检测局域网设备…',{exact:true}).count(),0);
-  await page.evaluate(()=>window.__fixture.localAddresses=['10.0.0.8']);await unlock(page);
-  assert.equal(await page.locator('#discovery-progress').isVisible(),false);assert.deepEqual(await page.locator('.local-address').allTextContents(),['10.0.0.8']);
+  const statusCalls=await page.evaluate(()=>{window.__heldSearch=document.querySelector('#search');return window.__fixture.calls.filter(c=>c.name==='app_status').length;});await page.clock.runFor(1100);
+  assert.equal(await page.locator('#lan-scan-progress').count(),0);assert.equal(await page.locator('#search').inputValue(),'Example');assert.equal(await page.evaluate(()=>window.__heldSearch===document.querySelector('#search')),true);
+  assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='app_status').length),statusCalls,'The one-second scan poll stops away from the devices page.');
+  await page.locator('[data-tab=devices]').click();assert.match(await page.locator('#lan-scan-count').innerText(),/已检测 20 \/ 253 个地址/);
+  await page.evaluate(()=>window.__fixture.delays.app_status=true);await page.clock.runFor(1100);await page.waitForFunction(()=>!!window.__fixture.pending.app_status);
+  await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();await page.evaluate(()=>{window.__fixture.delays.app_status=false;window.__release('app_status');});await page.clock.runFor(1100);
+  assert.equal(await page.locator('#lan-scan-progress,.local-addresses').count(),0);assert.equal(await page.getByText('正在检测局域网设备…',{exact:true}).count(),0);assert.equal(await page.locator('.app-version').innerText(),'版本 0.2.4');
+  await page.evaluate(()=>window.__fixture.localAddresses=['10.0.0.8']);await unlock(page);assert.deepEqual(await page.locator('.local-address').allTextContents(),['10.0.0.8']);
  });
+ await check('LAN scan reports actual limited ranges, failures and zero targets without false success',async page=>{
+  await page.locator('[data-tab=devices]').click();await click(page,'detect');await ready(page);
+  assert.match(await page.locator('#lan-scan-ranges').innerText(),/192\.168\.100\.0\/24/);assert.equal(await page.locator('#lan-scan-limit').isVisible(),true);
+  assert.match(await page.locator('#lan-scan-limit').innerText(),/限制扫描范围.*未扫描整个局域网/);
+  await page.evaluate(()=>{window.__fixture.discovering=false;window.__fixture.scanState='failed';window.__fixture.scanError='网卡信息读取失败';});await tick(page);
+  assert.match(await page.locator('#lan-scan-state').innerText(),/失败/);assert.match(await page.locator('.workspace').innerText(),/网卡信息读取失败/);assert.doesNotMatch(await page.locator('#notice').innerText(),/本轮检测已结束。/);
+  await page.evaluate(()=>{window.__fixture.scanState='completed';window.__fixture.scanChecked=0;window.__fixture.scanTotal=0;window.__fixture.scanRanges=[];window.__fixture.scanLimited=false;window.__fixture.scanError='没有可探测的私网 IPv4 地址';});await tick(page);
+  assert.match(await page.locator('.workspace').innerText(),/没有可探测的私网 IPv4 地址/);if(await page.locator('#lan-scan-progress').count())assert.notEqual(Number(await page.locator('#lan-scan-progress').getAttribute('value')),100);await shot(page,'desktop-discovery-empty-range');
+ },{scanRanges:['192.168.100.0/24'],scanLimited:true});
+ await check('peer versions distinguish compatible unknown clients from read-only legacy devices',async page=>{
+  await page.locator('[data-tab=devices]').click();assert.deepEqual(await page.locator('[data-merge-device]').evaluateAll(buttons=>buttons.map(button=>button.dataset.mergeDevice).sort()),['peer-1','unknown-version-peer']);
+  assert.equal(await page.locator('.app-version').innerText(),'版本 0.2.4');assert.match(await page.locator('#version-compatibility').innerText(),/0\.2\.3、0\.2\.4/);assert.match(await page.locator('#version-compatibility').innerText(),/0\.2\.2.*不兼容/);
+  assert.match(await page.locator('[data-peer-id="peer-1"] .peer-version').innerText(),/版本 0\.2\.4/);
+  const unknown=await page.locator('[data-peer-id="unknown-version-peer"] .peer-version').innerText();assert.match(unknown,/版本未提供.*支持单向接收/);assert.doesNotMatch(unknown,/0\.2\.3/,'A compatible older client without version metadata must not be assigned a guessed version.');
+  assert.match(await page.locator('#incompatible-devices').innerText(),/旧版测试手机/);assert.match(await page.locator('[data-incompatible-peer-id="legacy-peer"]').innerText(),/具体版本未知.*需更新/);
+  assert.equal(await page.locator('#incompatible-devices [data-merge-device]').count(),0);assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>c.name==='request_merge')),false);
+ },{discovered:[peer,{id:'unknown-version-peer',name:'兼容客户端',endpoint:'http://192.168.1.22:17842',last_seen:Date.now()/1000,app_version:null}],incompatibleDiscovered:[{id:'legacy-peer',name:'旧版测试手机',endpoint:'http://192.168.1.21:17842',last_seen:Date.now()/1000,protocol:2}]});
  await check('all current LAN addresses render and an empty network has a clear message',async page=>{
   await page.locator('[data-tab=devices]').click();assert.deepEqual(await page.locator('.local-address').allTextContents(),['192.168.100.200','10.10.10.10','172.18.0.4']);
   assert.equal(await page.locator('.local-addresses').getAttribute('aria-label'),'本机局域网 IP');
@@ -262,9 +283,9 @@ try{
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).check();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).uncheck();assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);await shot(page,'mobile-vault',{fullPage:false});await click(page,'recovery');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-recovery',{fullPage:false});await page.locator('[data-recovery-id]').click();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-recovery-history',{fullPage:false});await click(page,'close');
   await page.locator('[data-tab=devices]').click();await page.getByText('123456',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);assert.deepEqual(await page.locator('.local-address').allTextContents(),['192.168.100.200','10.10.10.10','172.18.0.4']);await shot(page,'mobile-devices',{fullPage:false});await click(page,'detect');await ready(page);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-discovery-progress',{fullPage:false});
   await page.evaluate(()=>{window.__fixture.discovered[0].name='A'.repeat(64);window.__fixture.merges[0].peer_name='B'.repeat(64);});await tick(page);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
- },{mobile:true,discovered:[peer],merges:[incoming],localAddresses:['192.168.100.200','10.10.10.10','172.18.0.4']});
+ },{mobile:true,discovered:[peer],merges:[incoming],localAddresses:['192.168.100.200','10.10.10.10','172.18.0.4'],scanRanges:['192.168.100.0/24','10.10.10.0/24','172.18.0.0/24'],scanTotal:759});
  await check('local vault remains available when networking failed',async page=>{
-  assert.equal(await page.locator('[data-entry]').count(),1);await page.locator('[data-tab=devices]').click();await page.getByText('端口被其他程序占用',{exact:true}).waitFor();assert.equal(await page.locator('[data-action=detect]').isDisabled(),true);assert.equal(await page.locator('#discovery-progress').isVisible(),false);assert.deepEqual(await page.locator('.local-address').allTextContents(),['192.168.1.10']);await page.locator('[data-tab=vault]').click();await shot(page,'desktop-vault');
+  assert.equal(await page.locator('[data-entry]').count(),1);await page.locator('[data-tab=devices]').click();await page.getByText('端口被其他程序占用',{exact:true}).waitFor();assert.equal(await page.locator('[data-action=detect]').isDisabled(),true);assert.equal(await page.locator('#lan-scan-progress').isVisible(),false);assert.deepEqual(await page.locator('.local-address').allTextContents(),['192.168.1.10']);await page.locator('[data-tab=vault]').click();await shot(page,'desktop-vault');
  },{serviceError:true});
  console.log(`${passed} desktop/mobile UI scenarios passed`);
 }finally{await browser?.close();server.kill('SIGTERM');}

@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import type { AppStatus, Entry, EntryInput, EntrySummary, MergeSession } from './types';
+import type { AppStatus, Entry, EntryInput, EntrySummary, MergeSession, ServiceStatus } from './types';
 import './styles.css';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -33,17 +33,41 @@ let epoch = 0;
 let lastActivity = 0;
 let discoveryClock:{generation:number;duration:number;remaining:number;sampledAt:number}|null = null;
 let discoveryTimer:ReturnType<typeof setInterval>|null = null;
+let detectionPolling = false;
+let detectionPollGeneration = 0;
 
-function stopDiscoveryTimer(){if(discoveryTimer!==null){clearInterval(discoveryTimer);discoveryTimer=null;}}
+const scanActive = (service?:ServiceStatus|null) => service?.scan_state==='planning'||service?.scan_state==='scanning';
+const detectionActive = (service?:ServiceStatus|null) => service?.running===true&&(service.discovering||scanActive(service));
+function stopDiscoveryTimer(){if(discoveryTimer!==null){clearInterval(discoveryTimer);discoveryTimer=null;detectionPollGeneration++;}}
 function resetDiscoveryProgress(){stopDiscoveryTimer();discoveryClock=null;}
 function remainingDiscoverySeconds(){return discoveryClock?Math.max(0,discoveryClock.remaining-(performance.now()-discoveryClock.sampledAt)/1000):null;}
 function recordDiscoveryProgress(next:AppStatus){
  const service=next.service;
- if(next.vault.locked||!service?.running||!service.discovering){resetDiscoveryProgress();return;}
+ if(next.vault.locked||!service?.running||!service.discovering){discoveryClock=null;return;}
  const duration=service.discovery_duration_secs,remaining=service.discovery_remaining_secs;
  if(!Number.isFinite(duration)||duration<=0||!Number.isFinite(remaining)||remaining<0){discoveryClock=null;return;}
  const previous=discoveryClock?.generation===service.discovery_generation&&discoveryClock.duration===duration?remainingDiscoverySeconds():null;
  discoveryClock={generation:service.discovery_generation,duration,remaining:Math.min(duration,remaining,previous??remaining),sampledAt:performance.now()};
+}
+function scanStateText(service:ServiceStatus){
+ if(service.scan_state==='completed')return service.scan_total===0?'没有可探测的局域网地址':service.scan_checked<service.scan_total?'扫描已结束，部分地址未完成':service.scan_limited?'本轮限定范围扫描完成':'端口扫描完成';
+ return {idle:'等待端口扫描',planning:'正在确定本机网段…',scanning:'正在扫描局域网服务端口…',cancelled:'端口扫描已取消',failed:'端口扫描失败',disabled:'端口扫描未启用'}[service.scan_state]??'等待端口扫描';
+}
+function detectionStateText(){
+ const service=status?.service;
+ if(status?.service_error)return status.service_error;
+ if(!service?.running)return '设备检测暂不可用';
+ if(detectionActive(service))return DETECTION_NOTICE;
+ if(service.scan_state==='failed')return '本轮端口扫描未完成';
+ if(service.scan_state==='cancelled')return '本轮检测已取消';
+ return service.last_discovery_at?`本轮检测已结束 · 上次检测：${when(service.last_discovery_at)}`:'等待开始检测';
+}
+function updateDetectionFeedback(){
+ if(notice!==DETECTION_NOTICE||isError)return;
+ const service=status?.service;
+ if(service?.scan_state==='failed'){feedback(service.scan_error||'局域网端口扫描失败，请重试。',true);return;}
+ if(detectionActive(service))return;
+ feedback(!service?.running?'设备检测已暂停。':service.scan_state==='cancelled'?'本轮检测已取消。':service.scan_total===0&&service.scan_error?service.scan_error:service.scan_limited?'本轮限定范围扫描已结束。':'本轮检测已结束。');
 }
 function updateDiscoveryProgress(){
  const section=document.querySelector<HTMLElement>('#discovery-progress-section');
@@ -51,20 +75,58 @@ function updateDiscoveryProgress(){
  const active=tab==='devices'&&!status?.vault.locked&&status?.service?.running&&status.service.discovering;
  section.hidden=!active;
  if(!active)return;
- const progress=document.querySelector<HTMLProgressElement>('#discovery-progress');
  const countdown=document.querySelector<HTMLElement>('#discovery-countdown');
- const percent=document.querySelector<HTMLElement>('#discovery-percent');
- if(!progress||!countdown||!percent)return;
+ if(!countdown)return;
  const remaining=remainingDiscoverySeconds();
- if(remaining===null||!discoveryClock){progress.removeAttribute('value');progress.removeAttribute('aria-valuetext');countdown.textContent='正在获取检测进度…';percent.textContent='';return;}
- const seconds=Math.ceil(remaining),value=Math.min(100,Math.max(0,Math.floor((1-remaining/discoveryClock.duration)*100)));
- const message=seconds>0?`剩余 ${seconds} 秒`:'正在等待检测结果…';
- progress.value=value;progress.setAttribute('aria-valuetext',`${message}，本轮检测时间进度 ${value}%`);countdown.textContent=message;percent.textContent=`${value}%`;
+ countdown.textContent=remaining===null?'自动发现：正在获取状态…':remaining>0?`自动发现：剩余 ${Math.ceil(remaining)} 秒`:'自动发现：正在等待结束…';
+}
+function updateLanScanProgress(){
+ const service=status?.service;
+ const section=document.querySelector<HTMLElement>('#lan-scan-section');
+ if(section)section.hidden=status?.vault.locked===true||!service?.running;
+ const summary=document.querySelector<HTMLElement>('#detection-state-text');if(summary)summary.textContent=detectionStateText();
+ const button=document.querySelector<HTMLButtonElement>('[data-action="detect"]');
+ if(button){const active=detectionActive(service);button.dataset.unavailable=String(!service?.running||active);button.disabled=busy||!service?.running||active;button.textContent=active?'正在检测…':'手动检测设备';}
+ if(!section||!service)return;
+ const progress=document.querySelector<HTMLProgressElement>('#lan-scan-progress');
+ const state=document.querySelector<HTMLElement>('#lan-scan-state');
+ const count=document.querySelector<HTMLElement>('#lan-scan-count');
+ const percent=document.querySelector<HTMLElement>('#lan-scan-percent');
+ const ranges=document.querySelector<HTMLElement>('#lan-scan-ranges');
+ const limit=document.querySelector<HTMLElement>('#lan-scan-limit');
+ const error=document.querySelector<HTMLElement>('#lan-scan-error');
+ if(!progress||!state||!count||!percent||!ranges||!limit||!error)return;
+ const total=Math.max(0,Number.isFinite(service.scan_total)?service.scan_total:0),checked=Math.max(0,Number.isFinite(service.scan_checked)?service.scan_checked:0);
+ const value=total>0?Math.min(100,Math.floor(checked/total*100)):0;
+ state.textContent=scanStateText(service);state.classList.toggle('error-text',service.scan_state==='failed');
+ count.textContent=total>0?`已检测 ${checked} / ${total} 个地址`:scanActive(service)?'正在准备检测地址…':'未找到可探测的局域网地址';
+ progress.hidden=total===0&&!scanActive(service);
+ if(total>0){progress.value=value;progress.setAttribute('aria-valuetext',`已检测 ${checked} / ${total} 个地址`);percent.textContent=`${value}%`;}
+ else{progress.removeAttribute('value');progress.removeAttribute('aria-valuetext');percent.textContent='';}
+ ranges.textContent=`扫描范围：${service.scan_ranges?.length?service.scan_ranges.join('、'):'暂无可探测范围'} · 服务端口 ${service.scan_port||17842}`;
+ limit.hidden=!service.scan_limited;error.hidden=!service.scan_error;error.textContent=service.scan_error||'';
 }
 function syncDiscoveryTimer(){
- const active=tab==='devices'&&!status?.vault.locked&&status?.service?.running&&status.service.discovering&&document.querySelector('#discovery-progress-section');
+ const active=tab==='devices'&&!status?.vault.locked&&detectionActive(status?.service)&&document.querySelector('#lan-scan-section');
  if(!active){stopDiscoveryTimer();return;}
- if(discoveryTimer===null)discoveryTimer=setInterval(updateDiscoveryProgress,1000);
+ if(discoveryTimer===null)discoveryTimer=setInterval(()=>{updateDiscoveryProgress();void pollDetectionStatus();},1000);
+}
+async function pollDetectionStatus(){
+ if(detectionPolling||refreshing||busy||tab!=='devices'||status?.vault.locked||!detectionActive(status?.service))return;
+ const current=epoch,sequence=refreshSequence,generation=detectionPollGeneration;
+ detectionPolling=true;
+ try{
+  const next=await api<AppStatus>('app_status');
+  // A full refresh always has priority. Status polling never invalidates its
+  // pending list_entries response or acknowledges a completed password merge.
+  if(current!==epoch||sequence!==refreshSequence||generation!==detectionPollGeneration||tab!=='devices')return;
+  if(next.vault.locked){clearSecrets();status=next;render();return;}
+  if(busy)return;
+  if((next.service?.discovery_generation??0)<(status?.service?.discovery_generation??0))return;
+  status=next;recordDiscoveryProgress(next);updateDetectionFeedback();updateDiscoveryProgress();updateLanScanProgress();syncDiscoveryTimer();
+  if(!dialog&&!busy&&renderedSignature!==viewSignature()&&!document.activeElement?.matches('input,textarea,select'))render();
+ }catch(error){if(current===epoch&&sequence===refreshSequence&&generation===detectionPollGeneration&&tab==='devices'&&!busy&&!status?.vault.locked)feedback(String(error),true);}
+ finally{detectionPolling=false;}
 }
 function localAddresses(){
  return [...new Set((status?.local_addresses??[]).filter(address=>{
@@ -75,10 +137,11 @@ function localAddresses(){
  }))];
 }
 function discoveryProgressView(){
- const service=status?.service;
- if(!service?.running||!service.discovering)return '';
- const duration=service.discovery_duration_secs;
- return `<div id="discovery-progress-section" class="discovery-progress"><div class="discovery-progress-heading"><span>本轮检测时间进度</span><span id="discovery-percent"></span></div><progress id="discovery-progress" max="100" aria-label="本轮检测时间进度"></progress><div class="discovery-progress-heading"><span id="discovery-countdown">正在获取检测进度…</span>${Number.isFinite(duration)&&duration>0?`<span>本轮 ${esc(duration)} 秒</span>`:''}</div></div>`;
+ return `<div id="discovery-progress-section" class="discovery-progress mdns-progress" hidden><span id="discovery-countdown">自动发现：正在获取状态…</span><span class="muted">同时等待局域网设备广播</span></div>`;
+}
+function lanScanView(){
+ if(!status?.service)return '';
+ return `<div id="lan-scan-section" class="discovery-progress lan-scan"><div class="discovery-progress-heading"><span id="lan-scan-state">等待端口扫描</span><span id="lan-scan-percent"></span></div><progress id="lan-scan-progress" max="100" aria-label="局域网端口扫描进度"></progress><p id="lan-scan-count"></p><p id="lan-scan-ranges"></p><p id="lan-scan-limit" class="scan-warning" hidden>已限制扫描范围，未扫描整个局域网。</p><p id="lan-scan-error" class="error-text" hidden></p></div>`;
 }
 
 const when = (value?:number|null) => value ? new Date(value < 1e12 ? value*1000 : value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '暂无记录';
@@ -94,8 +157,8 @@ async function refresh(renderPage=true) {
  if(current!==epoch||sequence!==refreshSequence)return;
  if(next.vault.locked && status && !status.vault.locked) clearSecrets();
  status=next;
- if(notice===DETECTION_NOTICE&&!isError&&!next.service?.discovering)feedback(next.service?.running&&next.service.last_discovery_at?'本轮检测已结束。':'设备检测已暂停。');
- recordDiscoveryProgress(next);updateDiscoveryProgress();syncDiscoveryTimer();
+ updateDetectionFeedback();
+ recordDiscoveryProgress(next);updateDiscoveryProgress();updateLanScanProgress();syncDiscoveryTimer();
  if(!next.vault.locked){
    const values=await api<EntrySummary[]>('list_entries');
    if(current!==epoch||sequence!==refreshSequence||status?.vault.locked)return;
@@ -121,22 +184,23 @@ function mergeMessage(merge:MergeSession):string {
  if(merge.state==='completed')return completedVerified.has(merge.id)?mergeCompletedMessage(merge):'正在核对本机密码本…';
  return {waiting:merge.verification_code?'等待另一台设备确认':'正在连接另一台设备…',awaiting_confirmation:'请核对两台设备上的编号',merging:merge.direction==='incoming'?'正在向对方提供密码…':'正在接收并合并密码…',rejected:'本次合并已拒绝或取消',failed:'合并失败，请重试',expired:'合并请求已过期，请重新发起'}[merge.state];
 }
+const appVersionLabel = () => status?.app_version?`版本 ${status.app_version}`:'版本未提供';
 const noticeMarkup = () => `<div id="notice" class="notice ${isError?'error':''}" role="status" aria-live="polite">${esc(notice)}</div>`;
 // Countdown samples update their own nodes; they do not invalidate the page.
-const viewSignature = () => JSON.stringify({entries,status:status?{...status,service:status.service?{...status.service,discovery_remaining_secs:undefined}:null}:null,completed:[...completedVerified]});
+const viewSignature = () => JSON.stringify({entries,status:status?{...status,service:status.service?{...status.service,discovery_remaining_secs:undefined,scan_checked:undefined,scan_total:undefined,scan_state:undefined,scan_ranges:undefined,scan_limited:undefined,scan_error:undefined}:null}:null,completed:[...completedVerified]});
 function render() {
  renderedSignature=viewSignature();
  if(!isTauri()) { root.innerHTML=`<main class="gate"><div class="mark">◇</div><h1>OhMyPassword</h1><p>请使用桌面或移动客户端</p><p class="muted">浏览器预览只展示界面，不保存密码，也不会连接本地密码库。</p></main>`; return; }
  if(!status){root.innerHTML='<main class="gate"><div class="mark">◇</div><h1>OhMyPassword</h1><p>正在打开本地密码库…</p>'+noticeMarkup()+'</main>';return;}
  if(status.vault.locked){renderGate();return;}
- root.innerHTML=`<div class="shell"><aside><a class="brand" href="#"><span class="mark small">◇</span><span>OhMyPassword<small>你的本地密码库</small></span></a><nav aria-label="主要页面">${(['vault','devices','browser'] as const).map(t=>`<button data-tab="${t}" class="nav ${tab===t?'active':''}" ${tab===t?'aria-current="page"':''}><span>${icon(t)}</span>${{vault:'密码库',devices:'设备同步',browser:'浏览器'}[t]}</button>`).join('')}</nav><div class="sidebar-foot"><span class="status-dot"></span>本地加密 · 已解锁<br><small>${esc(status.vault.device_name)}</small><button class="quiet" data-action="lock">锁定密码库</button></div></aside><main class="workspace"><header><div><span class="eyebrow">OHMYPASSWORD</span><h1>${{vault:'密码库',devices:'设备同步',browser:'浏览器连接'}[tab]}</h1></div><button class="quiet mobile-lock" data-action="lock">锁定</button>${tab==='vault'?'<button class="primary" data-action="new">＋ 新增密码</button>':''}</header>${noticeMarkup()}${tab==='vault'?vaultView():tab==='devices'?devicesView():browserView()}<footer>15 分钟无应用内操作后自动锁定${status.mobile?' · 切换到后台即锁定':''}</footer></main></div>${dialog?dialogView():''}`;
+ root.innerHTML=`<div class="shell"><aside><a class="brand" href="#"><span class="mark small">◇</span><span>OhMyPassword<small>你的本地密码库</small></span></a><nav aria-label="主要页面">${(['vault','devices','browser'] as const).map(t=>`<button data-tab="${t}" class="nav ${tab===t?'active':''}" ${tab===t?'aria-current="page"':''}><span>${icon(t)}</span>${{vault:'密码库',devices:'设备同步',browser:'浏览器'}[t]}</button>`).join('')}</nav><div class="sidebar-foot"><span class="status-dot"></span>本地加密 · 已解锁<br><small>${esc(status.vault.device_name)}</small><button class="quiet" data-action="lock">锁定密码库</button></div></aside><main class="workspace"><header><div><span class="eyebrow">OHMYPASSWORD</span><h1>${{vault:'密码库',devices:'设备同步',browser:'浏览器连接'}[tab]}</h1></div><button class="quiet mobile-lock" data-action="lock">锁定</button>${tab==='vault'?'<button class="primary" data-action="new">＋ 新增密码</button>':''}</header>${noticeMarkup()}${tab==='vault'?vaultView():tab==='devices'?devicesView():browserView()}<footer><span class="app-version">${esc(appVersionLabel())}</span> · 15 分钟无应用内操作后自动锁定${status.mobile?' · 切换到后台即锁定':''}</footer></main></div>${dialog?dialogView():''}`;
  bind();
  if(dialog){const el=document.querySelector<HTMLDialogElement>('dialog');el?.insertAdjacentHTML('afterbegin',`<div id="dialog-notice" class="notice ${isError?'error':''}" role="status" aria-live="polite">${esc(isError?notice:'')}</div>`);el?.showModal();el?.querySelector<HTMLInputElement>('input:not([type=hidden])')?.focus();}
- setBusy(busy);updateDiscoveryProgress();syncDiscoveryTimer();
+ setBusy(busy);updateDiscoveryProgress();updateLanScanProgress();syncDiscoveryTimer();
 }
 function renderGate() {
  const create=!status!.vault.initialized;
- root.innerHTML=`<main class="gate"><div class="mark">◇</div><span class="eyebrow">OHMYPASSWORD</span><h1>${create?'创建你的密码库':'欢迎回来'}</h1><p>${create?'密码保存在本机，与你信任的设备同步。':'输入主密码，解锁这台设备上的密码库。'}</p><form id="gate-form" class="gate-card">${create?'<label>这台设备的名称<input name="device_name" required maxlength="64" autocomplete="off" placeholder="例如：我的 MacBook"></label>':''}<label>主密码<input id="master-password" name="password" type="password" required ${create?'minlength="10"':''} maxlength="512" autocomplete="${create?'new-password':'current-password'}" autofocus></label>${create?'<label>再次输入主密码<input name="confirm" type="password" required minlength="10" maxlength="512" autocomplete="new-password"></label><p class="hint">至少 10 个字符。主密码不能找回，请妥善保管。每台设备可设置不同主密码。</p>':''}<button class="primary full" type="submit">${create?'创建并加密':'解锁密码库'}</button></form>${noticeMarkup()}<p class="hint">${create?'已有其他设备？先创建本机密码库，再检测设备并手动合并。':'解锁后可使用浏览器插件，并检测设备以手动合并密码本。'}</p></main>`;
+ root.innerHTML=`<main class="gate"><div class="mark">◇</div><span class="eyebrow">OHMYPASSWORD</span><h1>${create?'创建你的密码库':'欢迎回来'}</h1><p>${create?'密码保存在本机，与你信任的设备同步。':'输入主密码，解锁这台设备上的密码库。'}</p><form id="gate-form" class="gate-card">${create?'<label>这台设备的名称<input name="device_name" required maxlength="64" autocomplete="off" placeholder="例如：我的 MacBook"></label>':''}<label>主密码<input id="master-password" name="password" type="password" required ${create?'minlength="10"':''} maxlength="512" autocomplete="${create?'new-password':'current-password'}" autofocus></label>${create?'<label>再次输入主密码<input name="confirm" type="password" required minlength="10" maxlength="512" autocomplete="new-password"></label><p class="hint">至少 10 个字符。主密码不能找回，请妥善保管。每台设备可设置不同主密码。</p>':''}<button class="primary full" type="submit">${create?'创建并加密':'解锁密码库'}</button></form>${noticeMarkup()}<p class="hint">${create?'已有其他设备？先创建本机密码库，再检测设备并手动合并。':'解锁后可使用浏览器插件，并检测设备以手动合并密码本。'}</p><small class="app-version">${esc(appVersionLabel())}</small></main>`;
  document.querySelector('#gate-form')?.addEventListener('submit',event=>{event.preventDefault();void run(async()=>{
   const form=event.currentTarget as HTMLFormElement;const data=new FormData(form);let password=String(data.get('password')??'');let confirm=String(data.get('confirm')??'');const name=String(data.get('device_name')??'');
   if(create&&password!==confirm){feedback('两次输入的主密码不一致',true);return;}
@@ -154,8 +218,10 @@ function devicesView(){
  const merges=service?.merges??[];
  const found=service?.discovered??[];
  const addresses=localAddresses();
+ const outdated=(service?.incompatible_discovered??[]).filter(peer=>!found.some(current=>current.id===peer.id));
+ const incompatible=outdated.length?`<section id="incompatible-devices" class="panel" aria-label="需要更新的设备"><h2>发现旧版设备</h2><p class="muted">以下设备需要更新客户端后才能接收密码。</p>${outdated.map(peer=>`<div class="device-row" data-incompatible-peer-id="${esc(peer.id)}"><span class="site-icon">!</span><div><strong>${esc(peer.name||'OhMyPassword 设备')}</strong><small>${esc(peer.endpoint)}</small><small class="peer-version">旧版客户端，具体版本未知 · 需更新</small></div></div>`).join('')}</section>`:'';
  const sessions=merges.length?`<section class="panel" aria-label="合并请求"><h2>合并请求</h2>${merges.map(merge=>`<article class="merge-card" data-merge-session="${esc(merge.id)}"><div class="device-row"><span class="site-icon">⇄</span><div><strong>${esc(merge.peer_name||'另一台设备')}</strong><small>${merge.direction==='incoming'?'对方请求接收本机密码 · 本机只读':'从对方接收密码 · 仅更新本机'} · ${esc(merge.endpoint)}</small></div><span class="merge-state ${['failed','rejected','expired'].includes(merge.state)?'error-text':''}">${esc(mergeMessage(merge))}</span></div>${merge.verification_code&&mergeActive(merge)?`<div class="verification"><span>核对编号</span><strong>${esc(merge.verification_code)}</strong><p>${merge.direction==='incoming'?'确认后仅向对方提供密码，本机密码不会被修改或删除。':'确认后仅在本机接收并合并对方的密码，对方密码不会改变。'}请核对两台设备显示的编号一致。</p></div>`:''}${merge.error?`<p class="error-text">${esc(merge.error)}</p>`:''}${merge.state==='completed'&&completedVerified.has(merge.id)?`<p class="hint">${merge.direction==='incoming'?`已提供 ${merge.source_count??0} 条密码；本机未接收或删除任何密码。`:`收到 ${merge.received_count??0} 条密码，写入 ${merge.changed_count??0} 个密码版本；本机原有密码不会因对方缺少记录而删除。`}</p>`:''}${merge.state==='awaiting_confirmation'?`<div class="merge-actions"><button class="secondary" data-respond-merge="${esc(merge.id)}" data-accept="false">拒绝</button><button class="primary" data-respond-merge="${esc(merge.id)}" data-accept="true">${merge.direction==='incoming'?'编号一致，允许提供':'编号一致，接收到本机'}</button></div>`:merge.state==='waiting'?`<div class="merge-actions"><button class="quiet" data-respond-merge="${esc(merge.id)}" data-accept="false">取消请求</button></div>`:''}</article>`).join('')}</section>`:'';
- return `<div class="summary-card discovery-summary"><span class="status-dot ${available?'':'offline'}"></span><div><strong>${available?'设备检测已开启':'设备检测暂不可用'}</strong><p>${status!.service_error?esc(status!.service_error):service?.discovering?'正在检测局域网设备…':service?.last_discovery_at?`本轮检测已结束 · 上次检测：${esc(when(service.last_discovery_at))}`:'等待开始检测'}</p>${discoveryProgressView()}${service?.next_discovery_at?`<p>下次检测：${esc(when(service.next_discovery_at))}</p>`:''}${service?.last_error?`<p class="error-text">${esc(service.last_error)}</p>`:''}</div><button class="secondary" data-action="detect" ${!available||service?.discovering?'disabled data-unavailable="true"':''}>${service?.discovering?'正在检测…':'手动检测设备'}</button><div class="local-network"><span>本机局域网 IP</span><div class="local-addresses" aria-label="本机局域网 IP">${addresses.length?addresses.map(address=>`<span class="local-address">${esc(address)}</span>`).join(''):'<span class="muted">未获取到局域网 IP，请连接 Wi-Fi 或有线网络。</span>'}</div></div></div><p class="hint">每 5 分钟自动检测一次设备。检测不会交换密码；双方确认后，只有发起方接收数据。提供方不会被修改，删除操作不会传给对方。</p>${sessions}<section class="panel"><h2>发现的设备 <span class="count">${found.length}</span></h2><p class="muted">请让两台设备使用兼容版本，连接同一局域网，并保持客户端打开且密码库已解锁。</p>${found.length?found.map(peer=>{const pending=merges.some(merge=>merge.peer_id===peer.id&&mergeActive(merge));return `<div class="device-row"><span class="site-icon">⇄</span><div><strong>${esc(peer.name||'OhMyPassword 设备')}</strong><small>${esc(peer.endpoint)} · ${esc(when(peer.last_seen))}</small></div><button class="secondary" data-merge-device="${esc(peer.id)}" ${!available||pending?'disabled data-unavailable="true"':''}>${pending?'接收处理中':'接收对方密码'}</button></div>`;}).join(''):'<p class="empty-line">尚未发现设备，可以点击“手动检测设备”重试。</p>'}</section><p class="hint">手机进入后台后会锁定并暂停，正在等待的合并会失效。回到前台解锁后，可重新检测并发起合并。</p>`;
+ return `<div class="summary-card discovery-summary"><span class="status-dot ${available?'':'offline'}"></span><div><strong>${available?'设备检测已开启':'设备检测暂不可用'}</strong><p id="detection-state-text">${esc(detectionStateText())}</p>${lanScanView()}${discoveryProgressView()}${service?.next_discovery_at?`<p>下次检测：${esc(when(service.next_discovery_at))}</p>`:''}${service?.last_error?`<p class="error-text">${esc(service.last_error)}</p>`:''}</div><button class="secondary" data-action="detect" ${!available||detectionActive(service)?'disabled data-unavailable="true"':''}>${detectionActive(service)?'正在检测…':'手动检测设备'}</button><div class="local-network"><span>本机局域网 IP</span><div class="local-addresses" aria-label="本机局域网 IP">${addresses.length?addresses.map(address=>`<span class="local-address">${esc(address)}</span>`).join(''):'<span class="muted">未获取到局域网 IP，请连接 Wi-Fi 或有线网络。</span>'}</div></div></div><p class="hint">每 5 分钟自动检测一次设备。检测不会交换密码；双方确认后，只有发起方接收数据。提供方不会被修改，删除操作不会传给对方。</p><p id="version-compatibility" class="hint">当前支持与 0.2.3、0.2.4 合并；0.2.2 及更早版本不兼容，请更新。</p>${sessions}${incompatible}<section class="panel"><h2>发现的设备 <span class="count">${found.length}</span></h2><p class="muted">请让两台设备使用兼容版本，连接同一局域网，并保持客户端打开且密码库已解锁。</p>${found.length?found.map(peer=>{const pending=merges.some(merge=>merge.peer_id===peer.id&&mergeActive(merge));return `<div class="device-row" data-peer-id="${esc(peer.id)}"><span class="site-icon">⇄</span><div><strong>${esc(peer.name||'OhMyPassword 设备')}</strong><small>${esc(peer.endpoint)} · ${esc(when(peer.last_seen))}</small><small class="peer-version">${peer.app_version?`版本 ${esc(peer.app_version)}`:'版本未提供'} · 支持单向接收</small></div><button class="secondary" data-merge-device="${esc(peer.id)}" ${!available||pending?'disabled data-unavailable="true"':''}>${pending?'接收处理中':'接收对方密码'}</button></div>`;}).join(''):'<p class="empty-line">尚未发现设备，可以点击“手动检测设备”重试。</p>'}</section><p class="hint">手机进入后台后会锁定并暂停，正在等待的合并会失效。回到前台解锁后，可重新检测并发起合并。</p>`;
 }
 function browserView(){
  const online=status!.service?.running===true;

@@ -2,6 +2,7 @@
 //! Discovery never grants access. The provider is read-only during each transfer.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod discovery;
+mod lan_scan;
 mod manual;
 mod protocol;
 pub use manual::MergeSession;
@@ -136,6 +137,7 @@ pub struct ServiceConfig {
     pub local_port: u16,
     pub lan_port: u16,
     pub enable_discovery: bool,
+    pub enable_lan_scan: bool,
     pub discovery_interval_secs: u64,
 }
 impl Default for ServiceConfig {
@@ -144,6 +146,7 @@ impl Default for ServiceConfig {
             local_port: 17841,
             lan_port: 17842,
             enable_discovery: true,
+            enable_lan_scan: true,
             discovery_interval_secs: 300,
         }
     }
@@ -154,6 +157,16 @@ pub struct DiscoveredPeer {
     pub name: String,
     pub endpoint: String,
     pub last_seen: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IncompatiblePeer {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub last_seen: u64,
+    pub protocol: u32,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceStatus {
@@ -166,6 +179,14 @@ pub struct ServiceStatus {
     pub discovering: bool,
     pub discovery_duration_secs: u64,
     pub discovery_remaining_secs: u64,
+    pub scan_state: String,
+    pub scan_checked: usize,
+    pub scan_total: usize,
+    pub scan_ranges: Vec<String>,
+    pub scan_limited: bool,
+    pub scan_error: Option<String>,
+    pub scan_port: u16,
+    pub incompatible_discovered: Vec<IncompatiblePeer>,
     pub merges: Vec<MergeSession>,
     pub last_error: Option<String>,
     pub discovered: Vec<DiscoveredPeer>,
@@ -183,6 +204,7 @@ struct Inner {
     local_port: u16,
     lan_port: u16,
     discovery_interval_secs: u64,
+    enable_lan_scan: bool,
     active: AtomicBool,
     shutdown: watch::Sender<bool>,
     detect_trigger: Notify,
@@ -192,6 +214,7 @@ struct Inner {
     replay: Mutex<ReplayGuard>,
     status: Mutex<ServiceStatus>,
     discovered: Mutex<HashMap<String, DiscoveredPeer>>,
+    incompatible_discovered: Mutex<HashMap<String, IncompatiblePeer>>,
     capacity: Arc<Semaphore>,
     rates: Mutex<HashMap<IpAddr, (u64, u32)>>,
     client: reqwest::Client,
@@ -225,6 +248,7 @@ impl Service {
             local_port,
             lan_port,
             discovery_interval_secs: config.discovery_interval_secs.max(1),
+            enable_lan_scan: config.enable_lan_scan,
             active: AtomicBool::new(true),
             shutdown,
             detect_trigger: Notify::new(),
@@ -242,11 +266,20 @@ impl Service {
                 discovering: false,
                 discovery_duration_secs: DISCOVERY_DURATION_SECS,
                 discovery_remaining_secs: 0,
+                scan_state: "idle".into(),
+                scan_checked: 0,
+                scan_total: 0,
+                scan_ranges: vec![],
+                scan_limited: false,
+                scan_error: None,
+                scan_port: lan_scan::PORT,
+                incompatible_discovered: vec![],
                 merges: vec![],
                 last_error: None,
                 discovered: vec![],
             }),
             discovered: Mutex::new(HashMap::new()),
+            incompatible_discovered: Mutex::new(HashMap::new()),
             capacity: Arc::new(Semaphore::new(8)),
             rates: Mutex::new(HashMap::new()),
             client,
@@ -285,6 +318,7 @@ impl Service {
                         .with_state(state.clone());
                     let lan_app = Router::new()
                         .route("/v3/info", get(challenge))
+                        .route("/v3/version", get(app_version))
                         .route("/v3/merge/request", post(manual::request))
                         .route("/v3/merge/reveal", post(manual::reveal))
                         .route("/v3/merge/{id}/status", post(manual::session_status))
@@ -354,6 +388,14 @@ impl Service {
                 discovering: false,
                 discovery_duration_secs: DISCOVERY_DURATION_SECS,
                 discovery_remaining_secs: 0,
+                scan_state: "idle".into(),
+                scan_checked: 0,
+                scan_total: 0,
+                scan_ranges: vec![],
+                scan_limited: false,
+                scan_error: None,
+                scan_port: lan_scan::PORT,
+                incompatible_discovered: vec![],
                 discovered: vec![],
                 merges: vec![],
             });
@@ -373,6 +415,13 @@ impl Service {
             found.retain(|_, p| now().saturating_sub(p.last_seen) < 660);
             status.discovered = found.values().cloned().collect();
             status.discovered.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        if let Ok(mut found) = self.inner.incompatible_discovered.lock() {
+            found.retain(|_, p| now().saturating_sub(p.last_seen) < 660);
+            status.incompatible_discovered = found.values().cloned().collect();
+            status
+                .incompatible_discovered
+                .sort_by(|a, b| a.id.cmp(&b.id));
         }
         status.merges = manual::views(&self.inner);
         status
@@ -394,6 +443,8 @@ impl Service {
         if let Ok(mut status) = self.inner.status.lock() {
             status.discovering = false;
             status.discovery_remaining_secs = 0;
+            status.scan_state = "cancelled".into();
+            status.scan_error = None;
             status.last_discovery_at = None;
             status.next_discovery_at = None;
             status.last_error = None;
@@ -401,6 +452,10 @@ impl Service {
         if let Ok(mut found) = self.inner.discovered.lock() {
             found.clear();
         }
+        if let Ok(mut found) = self.inner.incompatible_discovered.lock() {
+            found.clear();
+        }
+        self.inner.detect_trigger.notify_one();
     }
     pub fn resume(&self) {
         self.inner.active.store(true, Ordering::Release);
@@ -441,11 +496,34 @@ impl Inner {
         if lock(&self.vault).is_ok_and(|vault| vault.status().device_id == id) {
             return;
         }
+        // Serialize publication with pause() so a late mDNS/NSD callback cannot
+        // repopulate the cleared discovery list after the vault has locked.
+        let Ok(_status_guard) = self.status.lock() else {
+            return;
+        };
+        if self.ensure_active().is_err() {
+            return;
+        }
+        // A verified old-protocol response outranks a delayed multicast hint.
+        // Only a subsequent valid v3 HTTP probe can reclassify this endpoint.
+        if self.incompatible_discovered.lock().is_ok_and(|old| {
+            old.get(id).is_some_and(|peer| {
+                peer.endpoint == endpoint(address) && now().saturating_sub(peer.last_seen) < 660
+            })
+        }) {
+            return;
+        }
         if let Ok(mut found) = self.discovered.lock() {
             found.retain(|_, p| now().saturating_sub(p.last_seen) < 660);
             if found.len() < 128 || found.contains_key(id) {
+                let previous = found
+                    .get(id)
+                    .filter(|peer| peer.endpoint == endpoint(address));
+                let app_version = previous.and_then(|peer| peer.app_version.clone());
                 let name = if name.is_empty() {
-                    format!("OhMyPassword {}", &id[..8])
+                    previous
+                        .map(|peer| peer.name.clone())
+                        .unwrap_or_else(|| format!("OhMyPassword {}", &id[..8]))
                 } else {
                     name.chars().take(64).collect()
                 };
@@ -456,6 +534,7 @@ impl Inner {
                         name,
                         endpoint: endpoint(address),
                         last_seen: now(),
+                        app_version,
                     },
                 );
             }
@@ -472,6 +551,17 @@ impl Inner {
             status.next_discovery_at = Some(started + self.discovery_interval_secs);
             status.discovering = true;
             status.discovery_remaining_secs = DISCOVERY_DURATION_SECS;
+            status.scan_state = if self.enable_lan_scan {
+                "planning"
+            } else {
+                "disabled"
+            }
+            .into();
+            status.scan_checked = 0;
+            status.scan_total = 0;
+            status.scan_ranges.clear();
+            status.scan_limited = false;
+            status.scan_error = None;
         }
         self.detect_trigger.notify_one();
     }
@@ -761,6 +851,25 @@ async fn challenge(State(state): State<Arc<Inner>>) -> Result<Json<Challenge>> {
     }))
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppVersionInfo {
+    protocol: u32,
+    device_id: String,
+    epoch: String,
+    app_version: String,
+}
+async fn app_version(State(state): State<Arc<Inner>>) -> Result<Json<AppVersionInfo>> {
+    state.ensure_active()?;
+    let own = lock(&state.vault)?.status();
+    Ok(Json(AppVersionInfo {
+        protocol: 3,
+        device_id: own.device_id,
+        epoch: lock(&state.epoch)?.clone(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+    }))
+}
+
 async fn response_json<T: serde::de::DeserializeOwned>(
     mut response: reqwest::Response,
 ) -> Result<T> {
@@ -815,16 +924,33 @@ async fn discovery_worker(state: Arc<Inner>, interval_secs: u64) {
     let delay = Duration::from_secs(interval_secs.max(1));
     let mut deadline = tokio::time::Instant::now();
     let mut shutdown = state.shutdown.subscribe();
+    let mut scan: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         if *shutdown.borrow() {
             break;
         }
         tokio::select! {
-            _=tokio::time::sleep_until(deadline)=>{state.request_detection();deadline=tokio::time::Instant::now()+delay;},
-            _=state.detect_trigger.notified()=>{deadline=tokio::time::Instant::now()+delay;},
+            _=tokio::time::sleep_until(deadline)=>{
+                state.request_detection();
+                deadline=tokio::time::Instant::now()+delay;
+            },
+            _=state.detect_trigger.notified()=>{
+                deadline=tokio::time::Instant::now()+delay;
+                if let Some(previous) = scan.take() { previous.abort(); let _ = previous.await; }
+                if state.enable_lan_scan && state.ensure_active().is_ok() {
+                    if let Ok(status) = state.status.lock() {
+                        let generation = status.discovery_generation;
+                        scan = Some(tokio::spawn(lan_scan::run(state.clone(), generation)));
+                    }
+                }
+            },
             _=shutdown.changed()=>{if *shutdown.borrow(){break}},
         }
         manual::expire_sessions(&state);
+    }
+    if let Some(previous) = scan {
+        previous.abort();
+        let _ = previous.await;
     }
 }
 
