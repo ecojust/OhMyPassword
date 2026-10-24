@@ -35,6 +35,9 @@ const MAX_COUNTER_JUMP: u64 = 1_000_000;
 const EARLIEST_MS: u64 = 946_684_800_000; // 2000-01-01 UTC
 const MAX_PEERS: usize = 64;
 const MAX_CLIENTS: usize = 64;
+// Never rotate away an incident snapshot automatically. At the limit users
+// must archive backups explicitly before another import or restoration.
+const MAX_RECOVERY_BACKUPS: usize = 64;
 const AAD: &[u8] = b"OhMyPassword vault v1; Argon2id m=65536,t=3,p=1; AES-256-GCM";
 
 #[derive(Debug)]
@@ -483,7 +486,79 @@ impl Vault {
             .collect())
     }
 
+    /// Global recovery index, including records hidden by a deletion marker.
+    /// Summary fields describe the newest recoverable non-deleted revision;
+    /// `deleted` describes the record's current state. No passwords are listed.
+    pub fn list_recovery_entries(&self) -> Result<Vec<EntrySummary>> {
+        let mut entries = Vec::new();
+        for revisions in self.current()?.data.records.values() {
+            if let Some(entry) = revisions.iter().rev().find(|entry| !entry.deleted) {
+                entries.push(EntrySummary {
+                    id: entry.id.clone(),
+                    hostname: entry.hostname.clone(),
+                    title: entry.title.clone(),
+                    username: entry.username.clone(),
+                    version: entry.version.clone(),
+                    deleted: revisions.last().is_some_and(|entry| entry.deleted),
+                    conflict_count: revisions.len().saturating_sub(1),
+                });
+            }
+        }
+        entries.sort_by(|a, b| {
+            (&a.hostname, &a.username, &a.id).cmp(&(&b.hostname, &b.username, &b.id))
+        });
+        Ok(entries)
+    }
+
+    /// Unlike get_conflicts, this includes the current live revision and works
+    /// when the record is deleted. Recovery never accepts caller-supplied data.
+    pub fn recovery_history(&self, id: &str) -> Result<Vec<Entry>> {
+        let records = self
+            .current()?
+            .data
+            .records
+            .get(id)
+            .ok_or_else(|| error("账号历史不存在"))?;
+        Ok(records
+            .iter()
+            .rev()
+            .filter(|entry| !entry.deleted)
+            .cloned()
+            .collect())
+    }
+
+    /// Restore one stored revision as a new local edit, keeping all history.
+    /// An independent encrypted snapshot must be durable before any mutation.
+    pub fn restore_entry(&mut self, id: &str, version: Version) -> Result<Entry> {
+        self.ensure_record_writes_available()?;
+        let entry = self
+            .current()?
+            .data
+            .records
+            .get(id)
+            .and_then(|records| {
+                records.iter().find(|entry| !entry.deleted && entry.version == version)
+            })
+            .cloned()
+            .ok_or_else(|| error("所选历史版本不存在或不可恢复"))?;
+        self.upsert_with_backup(
+            EntryInput {
+                id: Some(entry.id.clone()),
+                hostname: entry.hostname.clone(),
+                title: entry.title.clone(),
+                username: entry.username.clone(),
+                password: entry.password.clone(),
+                notes: entry.notes.clone(),
+            },
+            Some("restore"),
+        )
+    }
+
     pub fn upsert(&mut self, input: EntryInput) -> Result<Entry> {
+        self.upsert_with_backup(input, None)
+    }
+
+    fn upsert_with_backup(&mut self, input: EntryInput, backup: Option<&str>) -> Result<Entry> {
         self.ensure_record_writes_available()?;
         let mut next = self.current()?.data.clone();
         let id = match &input.id {
@@ -512,7 +587,10 @@ impl Vault {
         };
         validate_entry(&entry)?;
         next.records.entry(id).or_default().push(entry.clone());
-        self.commit(next)?;
+        match backup {
+            Some(reason) => self.commit_with_backup(next, reason)?,
+            None => self.commit(next)?,
+        }
         Ok(entry)
     }
 
@@ -560,7 +638,44 @@ impl Vault {
         })
     }
 
+    /// One-way transfer shares only the latest live version of each record.
+    /// Neither historical passwords nor deletion markers leave the provider.
+    pub fn export_pull(&self) -> Result<SyncPayload> {
+        Ok(SyncPayload {
+            version: FORMAT,
+            records: self
+                .current()?
+                .data
+                .records
+                .values()
+                .filter_map(|records| records.last())
+                .filter(|entry| !entry.deleted)
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// Import a provider's live snapshot into this requesting vault only.
+    /// Missing remote records never delete local data. A newer local deletion
+    /// remains in force; recovering it requires an explicit restore_entry.
+    pub fn import_pull(&mut self, payload: SyncPayload) -> Result<MergeResult> {
+        if payload.records.iter().any(|entry| entry.deleted) {
+            return Err(error("单向合并不接受删除标记，未修改本机密码库"));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        if payload.records.iter().any(|entry| !ids.insert(entry.id.as_str())) {
+            return Err(error("单向合并包含重复账号，未修改本机密码库"));
+        }
+        self.merge_records(payload, Some("pull"))
+    }
+
+    /// Legacy version-union primitive, retained for reading/testing v1 data.
+    /// Network v3 must use export_pull/import_pull, never this bidirectional API.
     pub fn merge_sync(&mut self, payload: SyncPayload) -> Result<MergeResult> {
+        self.merge_records(payload, None)
+    }
+
+    fn merge_records(&mut self, payload: SyncPayload, backup: Option<&str>) -> Result<MergeResult> {
         self.ensure_record_writes_available()?;
         if payload.version != FORMAT || payload.records.len() > MAX_RECORDS {
             return Err(error("同步数据版本或大小无效"));
@@ -596,7 +711,10 @@ impl Vault {
             .map(|r| r.len().saturating_sub(1))
             .sum();
         if result.changed > 0 {
-            self.commit(next)?;
+            match backup {
+                Some(reason) => self.commit_with_backup(next, reason)?,
+                None => self.commit(next)?,
+            }
         }
         Ok(result)
     }
@@ -693,6 +811,41 @@ impl Vault {
             .ok_or_else(|| error("密码库已锁定"))?
             .data = data;
         Ok(())
+    }
+
+    fn commit_with_backup(&mut self, data: VaultData, reason: &str) -> Result<()> {
+        // Validate the entire candidate before making a backup or touching disk.
+        validate_data(&data, &self.device_id)?;
+        self.current()?;
+        let backups = self.directory.join("backups");
+        private_directory(&backups)?;
+        let count = fs::read_dir(&backups).map_err(io_error)?.count();
+        if count >= MAX_RECOVERY_BACKUPS {
+            return Err(error(&format!(
+                "加密恢复备份已达 64 份，请先归档 {} 中的备份；未修改密码库",
+                backups.display()
+            )));
+        }
+        let snapshot = backups.join(format!(
+            "before-{reason}-{}-{}", now_ms()?, Uuid::new_v4()
+        ));
+        // Exclusive directory creation prevents even a name collision from
+        // replacing an earlier snapshot. No files exist before mode tightening.
+        fs::create_dir(&snapshot).map_err(io_error)?;
+        private_directory(&snapshot)?;
+        // Copy the persisted encrypted envelope byte-for-byte, not plaintext.
+        // The matching device identity makes each snapshot independently usable.
+        let vault = read_bounded(&self.directory.join("vault.json"), MAX_FILE)?;
+        let identity = read_bounded(&self.directory.join("identity.json"), 1024)?;
+        atomic_write(&snapshot, "identity.json", &identity)?;
+        atomic_write(&snapshot, "vault.json", &vault)?;
+        #[cfg(unix)]
+        {
+            File::open(&snapshot).and_then(|file| file.sync_all()).map_err(io_error)?;
+            File::open(&backups).and_then(|file| file.sync_all()).map_err(io_error)?;
+            File::open(&self.directory).and_then(|file| file.sync_all()).map_err(io_error)?;
+        }
+        self.commit(data)
     }
 }
 
@@ -1004,6 +1157,29 @@ fn private_file(path: &Path, create_new: bool) -> Result<File> {
         options.mode(0o600);
     }
     options.open(path).map_err(io_error)
+}
+
+fn private_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(error("加密备份目录异常，未修改密码库")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path).map_err(io_error)?;
+        }
+        Err(err) => return Err(io_error(err)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    }
+    Ok(())
 }
 
 fn atomic_write(directory: &Path, filename: &str, bytes: &[u8]) -> Result<()> {

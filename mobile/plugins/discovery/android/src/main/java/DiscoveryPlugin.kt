@@ -73,7 +73,7 @@ class DiscoveryPlugin(private val activity:Activity):Plugin(activity) {
             registration=listener
             val service=NsdServiceInfo().apply {
                 serviceName="omp-${args.deviceId}";serviceType=type;port=args.port
-                setAttribute("protocol","2");setAttribute("device_id",args.deviceId)
+                setAttribute("protocol","3");setAttribute("device_id",args.deviceId)
             }
             try { nsd.registerService(service,NsdManager.PROTOCOL_DNS_SD,listener);invoke.resolve(JSObject()) }
             catch (_:Exception) { stopInternal();invoke.reject("局域网服务发布失败，请检查网络权限") }
@@ -143,7 +143,7 @@ class DiscoveryPlugin(private val activity:Activity):Plugin(activity) {
     private fun remember(info:NsdServiceInfo) {
         val id=info.attributes["device_id"]?.toString(Charsets.UTF_8)?:return
         val protocol=info.attributes["protocol"]?.toString(Charsets.UTF_8)?:return
-        if(protocol!="2" || id==ownId || runCatching{UUID.fromString(id)}.isFailure)return
+        if(protocol!="3" || id==ownId || runCatching{UUID.fromString(id)}.isFailure)return
         val host=info.host
         if(host !is Inet4Address || !host.isSiteLocalAddress || info.port !in 1..65535)return
         found[info.serviceName]=JSObject().apply {

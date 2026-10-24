@@ -12,7 +12,7 @@ npm run build --workspace @ohmypassword/extension
 npm run test:extension
 ```
 
-需要 Node.js 22 或更新版本。当前 0.2.2 的产物为 `extension/dist/` 和 `extension/ohmypassword-extension-0.2.2.zip`。Chrome 进入 `chrome://extensions`，Edge 进入 `edge://extensions`，开启开发者模式，选择「加载已解压的扩展程序」并选中 `dist` 目录；ZIP 需先解压。受组织管理且禁止自行安装扩展的浏览器需要管理员分发，不能通过本项目绕过其策略。
+需要 Node.js 22 或更新版本。当前 0.2.3 的产物为 `extension/dist/` 和 `extension/ohmypassword-extension-0.2.3.zip`。Chrome 进入 `chrome://extensions`，Edge 进入 `edge://extensions`，开启开发者模式，选择「加载已解压的扩展程序」并选中 `dist` 目录；ZIP 需先解压。受组织管理且禁止自行安装扩展的浏览器需要管理员分发，不能通过本项目绕过其策略。
 
 当前提供并验证 Chromium MV3 构建，不包含 Safari 扩展；Firefox 的扩展 ID、后台脚本和审核要求不同，尚未提供可发布的 Firefox 包。
 
@@ -24,7 +24,7 @@ npm run test:extension
 4. 遇到 Apple 或网易的内嵌登录框，按下文提示单独授权，再次选择账号。验证码、短信动态码、验证器代码、扫码和 Passkey 由你与网站完成，扩展不会代填或操作。
 5. 只有客户端使用其他端口时，才需要在「连接设置」修改端口；这里也可以检查连接或恢复默认端口。
 
-本版使用本地接口协议 2，客户端和扩展需同时更新。扩展升级或下次打开时，会从浏览器存储中移除旧版连接令牌和授权元数据，保留有效的自定义端口；无效的旧端口会恢复为 17841。
+本版继续使用本地浏览器接口协议 2；客户端 0.2.3 的局域网接收另用协议 3，两者独立。建议客户端和扩展使用配套版本。扩展升级或下次打开时，会从浏览器存储中移除旧版连接令牌和授权元数据，保留有效的自定义端口；无效的旧端口会恢复为 17841。
 
 当前解压加载版本的 Chrome / Edge 扩展 ID 固定为 `abnlejagphkafpbidkngaemnlfgbpdmb`，对应 Origin 为 `chrome-extension://abnlejagphkafpbidkngaemnlfgbpdmb`。Manifest 中的 RSA 公钥用于保持这个 ID 稳定，不是需要用户保存的连接密钥，也不是 CRX 签名私钥。客户端默认只接受这个固定扩展 Origin 的浏览器密码请求，普通网页默认拒绝。
 
@@ -83,7 +83,7 @@ QQ 邮箱的页面脚本在本次调研环境被网络拦截，未取得有效�
 
 `login.example.com`、`www.example.com` 与 `example.com` 共用匹配范围；`co.uk` 等多级后缀会按正确的可注册主域分组。内置 PSL 的 PRIVATE 规则将不同托管租户隔离，例如 `alice.github.io` 与 `bob.github.io` 不匹配。IP、localhost、未知后缀和公共后缀本身仍精确匹配。
 
-列表显示账号原保存网站；修改已有账号保留原 hostname 和 ID，新账号保存当前完整 hostname。页面跳转检查仍精确比较目标，即使跳转到同主域的另一个子域也要重新选择账号。客户端与扩展应使用配套的 0.2.2 版本。
+列表显示账号原保存网站；修改已有账号保留原 hostname 和 ID，新账号保存当前完整 hostname。页面跳转检查仍精确比较目标，即使跳转到同主域的另一个子域也要重新选择账号。客户端与扩展应使用配套的 0.2.3 版本。
 
 除主域名匹配外，扩展仅在以下**精确的官方登录入口**添加账号别名查询：
 

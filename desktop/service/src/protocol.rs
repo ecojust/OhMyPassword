@@ -97,7 +97,7 @@ struct Plain<T> {
 
 fn aad(route: &str, response: bool, env: &Envelope) -> Vec<u8> {
     format!(
-        "ohmypassword/2|{}|{}|{}|{}|{}|{}",
+        "ohmypassword/3|{}|{}|{}|{}|{}|{}",
         if response { "response" } else { "request" },
         route,
         env.from,
@@ -120,7 +120,7 @@ pub(crate) fn seal<T: Serialize>(
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
     let mut env = Envelope {
-        version: 2,
+        version: 3,
         from: from.into(),
         to: to.into(),
         request_id: request_id.into(),
@@ -157,7 +157,7 @@ pub(crate) fn open<T: DeserializeOwned>(
     response: bool,
     env: &Envelope,
 ) -> Result<T> {
-    if env.version != 2
+    if env.version != 3
         || !valid_id(&env.from)
         || !valid_id(&env.to)
         || !valid_id(&env.request_id)
@@ -227,6 +227,9 @@ mod tests {
         let epoch = random_id();
         let env = seal(&key, "sync", false, &a, &b, &id, &epoch, &"secret").unwrap();
         assert_eq!(open::<String>(&key, "sync", false, &env).unwrap(), "secret");
+        let mut legacy = env.clone();
+        legacy.version = 2;
+        assert!(open::<String>(&key, "sync", false, &legacy).is_err());
         assert!(open::<String>(&key, "pair", false, &env).is_err());
         assert!(open::<String>(&key, "sync", true, &env).is_err());
         let mut changed = env.clone();

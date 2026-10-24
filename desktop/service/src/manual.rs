@@ -21,6 +21,9 @@ pub struct MergeSession {
     pub expires_at: u64,
     pub completed_at: Option<u64>,
     pub error: Option<String>,
+    pub received_count: Option<usize>,
+    pub changed_count: Option<usize>,
+    pub source_count: Option<usize>,
 }
 pub(super) struct Session {
     pub view: MergeSession,
@@ -111,11 +114,6 @@ struct RemoteState {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Exchange {
-    data: SyncPayload,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Snapshot {
     data: SyncPayload,
     digest: String,
@@ -187,6 +185,9 @@ fn new_session(
             expires_at: now() + LIFETIME,
             completed_at: None,
             error: None,
+            received_count: None,
+            changed_count: None,
+            source_count: None,
         },
         own_id,
         own_epoch,
@@ -213,7 +214,7 @@ fn commitment(
     nonce: &str,
 ) -> String {
     let data = serde_json::json!([
-        "OhMyPassword manual merge commitment v2",
+        "OhMyPassword manual pull commitment v3",
         id,
         from,
         to,
@@ -294,9 +295,9 @@ fn derive(session: &mut Session, peer_public: &str, peer_nonce: &str) -> Result<
     let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
     let mut key = Zeroizing::new([0; 32]);
     let mut sas = Zeroizing::new([0; 4]);
-    hkdf.expand(b"OhMyPassword manual merge encryption v2", key.as_mut())
+    hkdf.expand(b"OhMyPassword manual pull encryption v3", key.as_mut())
         .map_err(|_| Error::Authentication)?;
-    hkdf.expand(b"OhMyPassword manual merge verification v2", sas.as_mut())
+    hkdf.expand(b"OhMyPassword manual pull verification v3", sas.as_mut())
         .map_err(|_| Error::Authentication)?;
     session.key = Some(key);
     session.view.verification_code = format!("{:06}", u32::from_be_bytes(*sas) % 1_000_000);
@@ -532,7 +533,7 @@ pub(super) async fn request(
         return Err(Error::TooLarge);
     }
     let input: Begin = serde_json::from_slice(&body).map_err(|_| Error::InvalidRequest)?;
-    if input.protocol != 2
+    if input.protocol != 3
         || !valid_id(&input.id)
         || !valid_id(&input.from)
         || !valid_id(&input.from_epoch)
@@ -579,7 +580,7 @@ pub(super) async fn request(
     );
     session.peer_commit = input.commitment;
     let reply = Begun {
-        protocol: 2,
+        protocol: 3,
         id: input.id.clone(),
         from: own.device_id,
         to: input.from,
@@ -719,7 +720,7 @@ pub(super) async fn session_status(
         },
     )?))
 }
-pub(super) async fn exchange(
+pub(super) async fn pull(
     State(state): State<Arc<Inner>>,
     Path(id): Path<String>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
@@ -727,24 +728,26 @@ pub(super) async fn exchange(
     body: Bytes,
 ) -> Result<Json<Envelope>> {
     let (a, env) = incoming_access(&state, &id, source, &headers, &body)?;
-    let input: Exchange = open(&a.key, &route(&id, "exchange"), false, &env)?;
+    let _: Empty = open(&a.key, &route(&id, "pull"), false, &env)?;
     if let Some(cached) = replay_cached(&state, &id, &env)? {
         return Ok(Json(cached));
     }
     lock(&state.replay)?.accept(&env.from, &env.request_id)?;
     let mut sessions = lock(&state.sessions)?;
     let session = live(&state, &mut sessions, &id, true)?;
-    if session.view.direction != "incoming" {
+    if session.view.direction != "incoming" || session.prepared_hash.is_some() {
         return Err(Error::Authentication);
     }
-    let mut vault = lock(&state.vault)?;
-    vault.merge_sync(input.data)?;
-    let data = vault.export_sync()?;
+    // The provider exports one approved snapshot and never accepts records.
+    // Only an exact retry can replay this cached snapshot.
+    let vault = lock(&state.vault)?;
+    let data = vault.export_pull()?;
+    session.view.source_count = Some(data.records.len());
     let hash = digest(&data)?;
     let reply = response(
         &a,
         &id,
-        "exchange",
+        "pull",
         &env,
         &Snapshot {
             data,
@@ -775,9 +778,11 @@ pub(super) async fn ack(
     {
         return Err(Error::Authentication);
     }
-    let vault = lock(&state.vault)?;
-    let current = digest(&vault.export_sync()?)?;
-    let completed = current == input.digest;
+    // A receipt confirms the approved snapshot was saved by the requester.
+    // The provider may continue editing; its current vault is never compared,
+    // locked for writes, or overwritten by the requester.
+    let current = input.digest;
+    let completed = true;
     let reply = response(
         &a,
         &id,
@@ -815,7 +820,14 @@ pub(super) async fn cancel(
             "rejected"
         }
         .into();
-        session.view.error = Some("对方已取消或未完成合并；已保存的记录会保留".into());
+        session.view.error = Some(
+            if session.view.direction == "incoming" {
+                "对方已取消或未完成接收；本机密码未修改"
+            } else {
+                "本次接收未确认完成；已保存到本机的记录会保留"
+            }
+            .into(),
+        );
         session.cached.clear();
         let _ = lock(&state.vault)?.end_merge_write(&id);
     }
@@ -855,9 +867,9 @@ async fn rpc<T: Serialize, R: serde::de::DeserializeOwned>(
         &a.peer_epoch,
         body,
     )?;
-    let path = format!("/v2/merge/{id}/{operation}");
+    let path = format!("/v3/merge/{id}/{operation}");
     let mut last_error = Error::Unavailable;
-    let attempts = if operation == "exchange" || operation == "ack" {
+    let attempts = if operation == "pull" || operation == "ack" {
         2
     } else {
         1
@@ -904,7 +916,7 @@ async fn outgoing(state: &Arc<Inner>, id: &str) -> Result<()> {
         session.peer_epoch = info.epoch;
         session.view.peer_name = info.name;
         Begin {
-            protocol: 2,
+            protocol: 3,
             id: id.into(),
             from: session.own_id.clone(),
             to: session.view.peer_id.clone(),
@@ -915,8 +927,8 @@ async fn outgoing(state: &Arc<Inner>, id: &str) -> Result<()> {
             commitment: own_commit(session),
         }
     };
-    let reply: Begun = post(state, remote, "/v2/merge/request", &begin).await?;
-    if reply.protocol != 2
+    let reply: Begun = post(state, remote, "/v3/merge/request", &begin).await?;
+    if reply.protocol != 3
         || reply.id != id
         || reply.from != begin.to
         || reply.to != begin.from
@@ -942,7 +954,7 @@ async fn outgoing(state: &Arc<Inner>, id: &str) -> Result<()> {
             nonce: encode(session.nonce.as_ref()),
         }
     };
-    let reply: Revealed = post(state, remote, "/v2/merge/reveal", &reveal).await?;
+    let reply: Revealed = post(state, remote, "/v3/merge/reveal", &reveal).await?;
     if reply.id != id || reply.from != begin.to || reply.to != begin.from {
         return Err(Error::Authentication);
     }
@@ -984,90 +996,76 @@ async fn outgoing(state: &Arc<Inner>, id: &str) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    for _ in 0..3 {
-        let data = {
-            let mut sessions = lock(&state.sessions)?;
-            let session = live(state, &mut sessions, id, true)?;
-            let vault = lock(&state.vault)?;
-            let data = vault.export_sync()?;
-            session.view.state = "merging".into();
-            data
-        };
-        let snapshot: Snapshot = rpc(state, id, "exchange", &Exchange { data }, false).await?;
-        if digest(&snapshot.data)? != snapshot.digest {
-            return Err(Error::Authentication);
-        }
-        let current = {
-            let mut sessions = lock(&state.sessions)?;
-            let _session = live(state, &mut sessions, id, true)?;
-            let mut vault = lock(&state.vault)?;
-            vault.merge_sync(snapshot.data)?;
-            digest(&vault.export_sync()?)?
-        };
-        // Concurrent writes are preserved. Recompute a new union if they changed
-        // the proposed snapshot, rather than replacing them with an old export.
-        if current != snapshot.digest {
-            continue;
-        }
-        let _write_lease = {
-            let mut sessions = lock(&state.sessions)?;
-            let _session = live(state, &mut sessions, id, true)?;
-            let mut vault = lock(&state.vault)?;
-            if digest(&vault.export_sync()?)? != current {
-                continue;
-            }
-            vault.begin_merge_write(id)?;
-            WriteLease {
-                vault: state.vault.clone(),
-                id: id.into(),
-            }
-        };
-        let acknowledgement: Result<Acknowledged> = rpc(
-            state,
-            id,
-            "ack",
-            &Ack {
-                digest: current.clone(),
-            },
-            false,
-        )
-        .await;
-        let acknowledgement = match acknowledgement {
-            Ok(reply) => reply,
-            Err(error) => {
-                // A lost ACK is recovered using an authenticated receipt; a
-                // generic HTTP success or an unverified status is insufficient.
-                let status: Result<RemoteState> = rpc(state, id, "status", &Empty {}, false).await;
-                match status {
-                    Ok(status)
-                        if status.state == "completed"
-                            && status.completed_hash.as_deref() == Some(&current) =>
-                    {
-                        Acknowledged {
-                            completed: true,
-                            digest: current.clone(),
-                        }
-                    }
-                    _ => return Err(error),
-                }
-            }
-        };
-        if acknowledgement.completed && acknowledgement.digest == current {
-            let mut sessions = lock(&state.sessions)?;
-            let session = live(state, &mut sessions, id, true)?;
-            if lock(&state.vault)?.status().locked {
-                return Err(Error::Locked);
-            }
-            session.completed_hash = Some(current);
-            session.view.state = "completed".into();
-            session.view.completed_at = Some(now());
-            session.cached.clear();
-            return Ok(());
-        }
+    {
+        let mut sessions = lock(&state.sessions)?;
+        live(state, &mut sessions, id, true)?.view.state = "merging".into();
     }
-    Err(Error::Vault(
-        "合并期间密码本持续变化，尚未确认完成；请停止编辑后重试。已保存的记录会保留".into(),
-    ))
+    // No account data leaves the requesting device. The only record-bearing
+    // message is the provider's response to this empty, authenticated request.
+    let snapshot: Snapshot = rpc(state, id, "pull", &Empty {}, false).await?;
+    if digest(&snapshot.data)? != snapshot.digest {
+        return Err(Error::Authentication);
+    }
+    let saved_digest = snapshot.digest;
+    let received_count = snapshot.data.records.len();
+    let _write_lease = {
+        let mut sessions = lock(&state.sessions)?;
+        let session = live(state, &mut sessions, id, true)?;
+        let mut vault = lock(&state.vault)?;
+        let merged = vault.import_pull(snapshot.data)?;
+        // Hold the requester's write lease through its receipt so completion
+        // cannot race a local deletion after the durable import.
+        vault.begin_merge_write(id)?;
+        session.view.received_count = Some(received_count);
+        session.view.changed_count = Some(merged.changed);
+        WriteLease {
+            vault: state.vault.clone(),
+            id: id.into(),
+        }
+    };
+    let acknowledgement: Result<Acknowledged> = rpc(
+        state,
+        id,
+        "ack",
+        &Ack {
+            digest: saved_digest.clone(),
+        },
+        false,
+    )
+    .await;
+    let acknowledgement = match acknowledgement {
+        Ok(reply) => reply,
+        Err(error) => {
+            // A lost ACK is recovered using an authenticated receipt of this
+            // exact snapshot, never by sending local records back to the source.
+            let status: Result<RemoteState> = rpc(state, id, "status", &Empty {}, false).await;
+            match status {
+                Ok(status)
+                    if status.state == "completed"
+                        && status.completed_hash.as_deref() == Some(&saved_digest) =>
+                {
+                    Acknowledged {
+                        completed: true,
+                        digest: saved_digest.clone(),
+                    }
+                }
+                _ => return Err(error),
+            }
+        }
+    };
+    if !acknowledgement.completed || acknowledgement.digest != saved_digest {
+        return Err(Error::Authentication);
+    }
+    let mut sessions = lock(&state.sessions)?;
+    let session = live(state, &mut sessions, id, true)?;
+    if lock(&state.vault)?.status().locked {
+        return Err(Error::Locked);
+    }
+    session.completed_hash = Some(saved_digest);
+    session.view.state = "completed".into();
+    session.view.completed_at = Some(now());
+    session.cached.clear();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1132,7 +1130,7 @@ mod tests {
         assert!(derive(&mut low, &zero, &nonce).is_err());
     }
     #[test]
-    fn pending_and_expired_sessions_cannot_be_approved_or_exchange() {
+    fn pending_and_expired_sessions_cannot_be_approved_or_pull() {
         let (_dir, vault, service) = fixture("A");
         let own = vault.lock().unwrap().status();
         let id = random_id();
@@ -1169,7 +1167,7 @@ mod tests {
         let (_ad, a, sa) = fixture("A");
         let (_bd, b, sb) = fixture("B");
         discover(&a, &sa, &b, &sb);
-        a.lock()
+        b.lock()
             .unwrap()
             .upsert(entry("example.com", "before-merge"))
             .unwrap();
@@ -1178,18 +1176,26 @@ mod tests {
         // normal sender task cannot race these duplicate-ACK assertions.
         sb.respond_merge(&id, true).unwrap();
         runtime().block_on(async {
-            let initial = a.lock().unwrap().export_sync().unwrap();
-            let snapshot: Snapshot = rpc(
+            let before = serde_json::to_vec(&b.lock().unwrap().export_sync().unwrap()).unwrap();
+            // A legacy-shaped encrypted upload cannot be interpreted as a pull.
+            let rejected: Result<Snapshot> = rpc(
                 &sa.inner,
                 &id,
-                "exchange",
-                &Exchange { data: initial },
+                "pull",
+                &serde_json::json!({
+                    "data": { "records": [] }
+                }),
                 false,
             )
-            .await
-            .unwrap();
-            a.lock().unwrap().merge_sync(snapshot.data).unwrap();
-            let hash = digest(&a.lock().unwrap().export_sync().unwrap()).unwrap();
+            .await;
+            assert!(rejected.is_err());
+            assert_eq!(
+                serde_json::to_vec(&b.lock().unwrap().export_sync().unwrap()).unwrap(),
+                before
+            );
+            let snapshot: Snapshot = rpc(&sa.inner, &id, "pull", &Empty {}, false).await.unwrap();
+            let hash = snapshot.digest;
+            a.lock().unwrap().import_pull(snapshot.data).unwrap();
             let access = access(&sa.inner, &id, false).unwrap();
             let env = seal(
                 &access.key,
@@ -1202,7 +1208,7 @@ mod tests {
                 &Ack { digest: hash },
             )
             .unwrap();
-            let path = format!("/v2/merge/{id}/ack");
+            let path = format!("/v3/merge/{id}/ack");
             let first: Envelope = post(&sa.inner, access.endpoint, &path, &env).await.unwrap();
             let ack: Acknowledged = open(&access.key, &route(&id, "ack"), true, &first).unwrap();
             assert!(ack.completed);
@@ -1212,9 +1218,7 @@ mod tests {
                 .unwrap();
             let repeated: Envelope = post(&sa.inner, access.endpoint, &path, &env).await.unwrap();
             assert_eq!(first.ciphertext, repeated.ciphertext);
-            let latest = a.lock().unwrap().export_sync().unwrap();
-            let result: Result<Snapshot> =
-                rpc(&sa.inner, &id, "exchange", &Exchange { data: latest }, true).await;
+            let result: Result<Snapshot> = rpc(&sa.inner, &id, "pull", &Empty {}, true).await;
             assert!(result.is_err());
             assert!(a
                 .lock()
@@ -1303,7 +1307,7 @@ mod tests {
             &a.lock().unwrap().status().device_id,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), sa.status().lan_port),
         );
-        a.lock()
+        b.lock()
             .unwrap()
             .upsert(entry("example.com", "merge-me"))
             .unwrap();
@@ -1322,10 +1326,22 @@ mod tests {
             .list(Some("during-ack.example"))
             .unwrap()
             .is_empty());
+        // Provider edits are independent of the requester's receipt. They
+        // remain local and do not require comparing the two entire vaults.
+        let new_source = b
+            .lock()
+            .unwrap()
+            .upsert(entry("source-during-ack.example", "source-keeps-editing"))
+            .unwrap();
         release.notify_one();
         eventually(|| {
             session(&sa, &id).state == "completed" && session(&sb, &id).state == "completed"
         });
+        assert_eq!(
+            b.lock().unwrap().get(&new_source.id).unwrap().password,
+            "source-keeps-editing"
+        );
+        assert!(a.lock().unwrap().get(&new_source.id).is_err());
         a.lock()
             .unwrap()
             .upsert(entry("after-merge.example", "new-local-edit"))

@@ -48,7 +48,7 @@ class DiscoveryPlugin:Plugin,NetServiceBrowserDelegate,NetServiceDelegate {
             self.stopInternal();self.ownId=args.deviceId;self.active=true
             let service=NetService(domain:"local.",type:self.type,name:"omp-\(args.deviceId)",port:Int32(args.port))
             service.delegate=self
-            service.setTXTRecord(NetService.data(fromTXTRecord:["protocol":Data("2".utf8),"device_id":Data(args.deviceId.utf8)]))
+            service.setTXTRecord(NetService.data(fromTXTRecord:["protocol":Data("3".utf8),"device_id":Data(args.deviceId.utf8)]))
             self.published=service;service.publish();invoke.resolve()
         }
     }
@@ -100,7 +100,7 @@ class DiscoveryPlugin:Plugin,NetServiceBrowserDelegate,NetServiceDelegate {
     func netServiceDidResolveAddress(_ service:NetService) {
         guard active,browser != nil,resolving[service.name]===service,let txt=service.txtRecordData() else{return}
         let data=NetService.dictionary(fromTXTRecord:txt)
-        guard let protocolData=data["protocol"],String(data:protocolData,encoding:.utf8)=="2",let idData=data["device_id"],let id=String(data:idData,encoding:.utf8),UUID(uuidString:id) != nil,id != ownId,service.port>0,service.port<=65535 else{return}
+        guard let protocolData=data["protocol"],String(data:protocolData,encoding:.utf8)=="3",let idData=data["device_id"],let id=String(data:idData,encoding:.utf8),UUID(uuidString:id) != nil,id != ownId,service.port>0,service.port<=65535 else{return}
         for address in service.addresses ?? [] {
             var host=[CChar](repeating:0,count:Int(NI_MAXHOST))
             let ok:Bool=address.withUnsafeBytes{buffer in

@@ -17,7 +17,7 @@ impl Discovery {
         let daemon = ServiceDaemon::new().map_err(|_| crate::Error::Unavailable)?;
         let id = lock(&state.vault)?.status().device_id;
         let hostname = format!("ohmypassword-{id}.local.");
-        let properties = [("protocol", "2"), ("device_id", id.as_str())];
+        let properties = [("protocol", "3"), ("device_id", id.as_str())];
         let info = ServiceInfo::new(SERVICE, &id, &hostname, "", state.lan_port, &properties[..])
             .map_err(|_| crate::Error::Unavailable)?
             .enable_addr_auto();
@@ -60,7 +60,7 @@ impl Discovery {
                         if let Ok(ServiceEvent::ServiceResolved(info)) =
                             receiver.recv_timeout(Duration::from_millis(150))
                         {
-                            if info.get_property_val_str("protocol") != Some("2") {
+                            if info.get_property_val_str("protocol") != Some("3") {
                                 continue;
                             }
                             let Some(peer) = info.get_property_val_str("device_id") else {

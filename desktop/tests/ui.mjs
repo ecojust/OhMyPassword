@@ -14,7 +14,7 @@ const fixtureEntry = {id:'record-1',hostname:'example.com',title:'Example',usern
 
 async function mock(page, options={}) {
  await page.addInitScript(({entry,options})=>{
-  const state={initialized:options.initialized!==false,locked:options.locked??false,mobile:options.mobile??false,entries:[entry],discovered:options.discovered??[],merges:options.merges??[],discovering:false,lastDiscovery:null,nextDiscovery:Date.now()/1000+300,discoveryGeneration:0,listError:false,calls:[],delays:{},pending:{},copied:[],events:{}};
+  const state={initialized:options.initialized!==false,locked:options.locked??false,mobile:options.mobile??false,entries:options.empty?[]:[entry],recovery:options.recovery??[{...entry,password:'previous-fixture-secret'}],restoreError:false,entryCountOverride:null,discovered:options.discovered??[],merges:options.merges??[],discovering:false,lastDiscovery:null,nextDiscovery:Date.now()/1000+300,discoveryGeneration:0,listError:false,calls:[],delays:{},pending:{},copied:[],events:{}};
   window.__fixture=state; window.isTauri=true;
   let next=1; const callbacks=new Map();
   window.__lock=()=>{state.locked=true;state.merges=[];callbacks.get(state.events['vault-locked'])?.({event:'vault-locked',id:1,payload:null});};
@@ -22,19 +22,21 @@ async function mock(page, options={}) {
   window.__TAURI_INTERNALS__={
    transformCallback(fn){const id=next++;callbacks.set(id,fn);return id;},unregisterCallback(id){callbacks.delete(id);},
    async invoke(name,args={}){
-    state.calls.push({name,...(name==='save_entry'?{id:args.input.id,hostname:args.input.hostname}:['request_merge','respond_merge'].includes(name)?args:{} )});
+    state.calls.push({name,...(name==='save_entry'?{id:args.input.id,hostname:args.input.hostname}:['request_merge','respond_merge','restore_entry'].includes(name)?args:{} )});
     let result;
     if(name==='plugin:event|listen'){state.events[args.event]=args.handler;return next++;}
     if(name==='plugin:event|unlisten')return;
     if(name==='plugin:clipboard-manager|write_text'){state.copied.push(args.text);return;}
-    if(name==='app_status')result={vault:{initialized:state.initialized,locked:state.locked,device_id:'device-1',device_name:'测试电脑',entry_count:state.entries.length,peer_count:0},service:options.serviceError?null:{local_endpoint:'http://127.0.0.1:17841',lan_port:17842,running:true,last_error:null,discovery_generation:state.discoveryGeneration,last_discovery_at:state.lastDiscovery,next_discovery_at:state.nextDiscovery,discovering:state.discovering,discovered:state.discovered,merges:state.merges},service_error:options.serviceError?'端口被其他程序占用':null,local_addresses:['192.168.1.10'],mobile:state.mobile};
+    if(name==='app_status')result={vault:{initialized:state.initialized,locked:state.locked,device_id:'device-1',device_name:'测试电脑',entry_count:state.entryCountOverride??state.entries.length,peer_count:0},service:options.serviceError?null:{local_endpoint:'http://127.0.0.1:17841',lan_port:17842,running:true,last_error:null,discovery_generation:state.discoveryGeneration,last_discovery_at:state.lastDiscovery,next_discovery_at:state.nextDiscovery,discovering:state.discovering,discovered:state.discovered,merges:state.merges},service_error:options.serviceError?'端口被其他程序占用':null,local_addresses:['192.168.1.10'],mobile:state.mobile};
     else if(name==='create_vault'||name==='unlock_vault'){if(args.password==='wrong-password')throw '主密码错误';state.initialized=true;state.locked=false;result=null;}
     else if(name==='lock_vault'){window.__lock();result=null;}
     else if(name==='user_activity')return;
     else if(state.locked)throw '密码库已锁定';
     else if(name==='list_entries'){if(state.listError)throw '密码列表刷新失败';result=state.entries.map(({password,notes,...item})=>({...item,conflict_count:0}));}
     else if(name==='get_entry')result=state.entries.find(item=>item.id===args.id);
-    else if(name==='entry_history')result=[{...entry,password:'previous-fixture-secret'}];
+    else if(name==='entry_history'||name==='recovery_history')result=state.recovery.filter(item=>item.id===args.id&&!item.deleted);
+    else if(name==='list_recovery_entries')result=state.recovery.filter(item=>!item.deleted).map(({password,notes,...item})=>({...item,deleted:!state.entries.some(current=>current.id===item.id),conflict_count:1}));
+    else if(name==='restore_entry'){if(state.restoreError)throw '加密备份保存失败，未恢复密码';const historic=state.recovery.find(item=>item.id===args.id&&item.version.counter===args.version.counter);if(!historic)throw '历史版本不存在';const value={...historic,version:{counter:historic.version.counter+1,device_id:'device-1',modified_at:Date.now()}};state.entries=state.entries.filter(item=>item.id!==value.id);state.entries.push(value);result=value;}
     else if(name==='save_entry'){const value={...args.input,id:args.input.id||'new-entry',deleted:false,version:{counter:2,device_id:'device-1',modified_at:Date.now()}};state.entries=state.entries.filter(item=>item.id!==value.id);state.entries.push(value);result=value;}
     else if(name==='delete_entry'){state.entries=state.entries.filter(item=>item.id!==args.id);result=null;}
     else if(name==='detect_devices'){state.discovering=true;state.discoveryGeneration++;state.lastDiscovery=Date.now()/1000;result=null;}
@@ -60,6 +62,7 @@ const ready = page=>page.waitForFunction(()=>document.querySelector('#app')?.get
 async function unlock(page){await page.locator('#master-password').fill('correct-fixture-password');await page.locator('#gate-form button').click();await page.locator('.shell').waitFor();await ready(page);}
 async function shot(page,name,{fullPage=true}={}){const directory=process.env.OMP_UI_CAPTURE_DIR||process.env.OMP_CAPTURE_DIR;if(directory){await mkdir(directory,{recursive:true});await page.screenshot({path:`${directory}/${name}.png`,fullPage});}}
 async function check(name,action,options={}){
+ if(process.env.OMP_UI_TEST_FILTER&&!new RegExp(process.env.OMP_UI_TEST_FILTER).test(name))return;
  const context=await browser.newContext({viewport:options.mobile?{width:390,height:844}:{width:1280,height:900}});
  const page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));
  try{
@@ -108,6 +111,31 @@ try{
   assert.equal(await page.evaluate(()=>window.__fixture.entries[0].password),'new-fixture-password');assert.equal(await page.evaluate(()=>window.__fixture.entries[0].id),'record-1');
   await page.locator('[data-entry]').click();await click(page,'delete');assert.equal(await page.evaluate(()=>window.__fixture.entries.length),1);await click(page,'confirm');await page.locator('.empty').waitFor();
  });
+ await check('global recovery works with an empty vault and restores only after confirmation',async page=>{
+  assert.equal(await page.locator('[data-entry]').count(),0);assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>c.name==='recovery_history')),false);
+  await click(page,'recovery');await page.locator('[data-recovery-id]').waitFor();assert.match(await page.locator('dialog').innerText(),/已删除，可恢复/);
+  assert.equal((await page.locator('dialog').innerHTML()).includes('previous-fixture-secret'),false);assert.equal((await page.locator('dialog').innerHTML()).includes(fixtureEntry.username),false);
+  await page.locator('[data-recovery-id]').click();await page.locator('[data-history-restore]').waitFor();assert.equal(await page.locator('input[aria-label="历史密码 1"]').getAttribute('type'),'password');
+  await page.locator('[data-history-restore]').click();await page.getByText('恢复这版密码？',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>c.name==='restore_entry')),false);
+  await click(page,'restore-back');await page.locator('[data-history-restore]').click();await click(page,'restore-confirm');await page.locator('dialog').waitFor({state:'detached'});await ready(page);
+  assert.match(await page.locator('#notice').innerText(),/已恢复为新的本地修改/);assert.equal(await page.locator('[data-entry]').count(),1);assert.equal(await page.evaluate(()=>window.__fixture.entries[0].password),'previous-fixture-secret');
+  assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='restore_entry').length),1);assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>['request_merge','respond_merge'].includes(c.name))),false);
+ },{empty:true});
+ await check('missing history is explicit and recovery errors stay visible without success',async page=>{
+  await click(page,'recovery');await page.getByText('当前密码库没有可恢复的历史。若密码库文件已被覆盖、重建或卸载，需要从保留的旧密码库或备份找回。',{exact:true}).waitFor();
+  assert.equal(await page.locator('[data-history-restore]').count(),0);await click(page,'close');
+  await page.evaluate(entry=>{window.__fixture.recovery=[entry];window.__fixture.restoreError=true;},fixtureEntry);await click(page,'recovery');await page.locator('[data-recovery-id]').click();await page.locator('[data-history-restore]').click();await click(page,'restore-confirm');await ready(page);
+  assert.match(await page.locator('#dialog-notice').innerText(),/加密备份保存失败/);assert.equal(await page.locator('dialog').count(),1);assert.equal(await page.locator('[data-entry]').count(),0);
+ },{empty:true,recovery:[]});
+ await check('locking clears recovery history and rejects late recovery replies',async page=>{
+  await click(page,'recovery');await page.locator('[data-recovery-id]').click();await page.locator('[data-history-restore]').waitFor();await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();
+  assert.equal((await page.content()).includes('previous-fixture-secret'),false);await unlock(page);await click(page,'recovery');await page.evaluate(()=>window.__fixture.delays.recovery_history=true);await page.locator('[data-recovery-id]').click();await page.waitForFunction(()=>!!window.__fixture.pending.recovery_history);
+  await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();await page.evaluate(()=>window.__release('recovery_history'));await ready(page);await unlock(page);assert.equal(await page.locator('dialog').count(),0);assert.equal((await page.content()).includes('previous-fixture-secret'),false);
+ });
+ await check('closing recovery cancels a pending history view without reopening secrets',async page=>{
+  await click(page,'recovery');await page.evaluate(()=>window.__fixture.delays.recovery_history=true);await page.locator('[data-recovery-id]').click();await page.waitForFunction(()=>!!window.__fixture.pending.recovery_history);
+  await click(page,'close');await page.evaluate(()=>window.__release('recovery_history'));await ready(page);assert.equal(await page.locator('dialog').count(),0);assert.equal((await page.content()).includes('previous-fixture-secret'),false);
+ });
  await check('browser connection needs no token or authorization form',async page=>{
   await page.locator('[data-tab=browser]').click();await page.getByText('直接连接本机客户端',{exact:true}).waitFor();
   assert.match(await page.locator('.workspace').innerText(),/无需生成或复制额外令牌/);
@@ -148,8 +176,8 @@ try{
   await page.evaluate(()=>Object.assign(window.__fixture.merges[0],{state:'awaiting_confirmation',verification_code:'123456'}));await tick(page);
   await page.getByText('123456',{exact:true}).waitFor();await shot(page,'desktop-devices');await page.locator('[data-respond-merge][data-accept=true]').click();await ready(page);
   assert.notEqual(await page.locator('#notice').innerText(),'已合并密码本');
-  await page.evaluate(()=>window.__fixture.merges[0].state='merging');await tick(page);await page.getByText('正在合并密码本…',{exact:true}).waitFor();
-  await page.evaluate(()=>{window.__fixture.entries.push({...window.__fixture.entries[0],id:'merged-entry',title:'合并后的新密码'});Object.assign(window.__fixture.merges[0],{state:'completed',completed_at:Date.now()/1000});});
+  await page.evaluate(()=>window.__fixture.merges[0].state='merging');await tick(page);await page.getByText('正在接收并合并密码…',{exact:true}).waitFor();
+  await page.evaluate(()=>{window.__fixture.entries.push({...window.__fixture.entries[0],id:'merged-entry',title:'合并后的新密码'});Object.assign(window.__fixture.merges[0],{state:'completed',completed_at:Date.now()/1000,received_count:1,changed_count:1});});
   await tick(page);await page.locator('#notice').filter({hasText:'已合并密码本'}).waitFor();assert.equal(await page.locator('#notice').innerText(),'已合并密码本');
   await page.locator('[data-tab=vault]').click();await page.getByText('合并后的新密码',{exact:true}).waitFor();
  },{discovered:[peer]});
@@ -159,14 +187,23 @@ try{
   assert.equal(await page.evaluate(()=>window.__fixture.calls.find(c=>c.name==='respond_merge').accept),false);
   assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);
  },{merges:[incoming]});
- await check('incoming accepted merge reports completion only after records refresh',async page=>{
+ await check('provider stays read-only and reports provision only after records refresh',async page=>{
   await page.locator('[data-tab=devices]').click();await page.locator('[data-respond-merge][data-accept=true]').click();await ready(page);
   assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);
   await page.evaluate(()=>{window.__fixture.listError=true;Object.assign(window.__fixture.merges[0],{state:'completed',completed_at:Date.now()/1000});});await tick(page);
   assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);
-  await page.evaluate(()=>window.__fixture.listError=false);await tick(page);await page.locator('#notice').filter({hasText:'已合并密码本'}).waitFor();
-  assert.equal(await page.locator('.merge-state').innerText(),'已合并密码本');await shot(page,'mobile-merged',{fullPage:false});
+  await page.evaluate(()=>{window.__fixture.listError=false;window.__fixture.merges[0].source_count=1;});await tick(page);await page.locator('#notice').filter({hasText:'已向对方提供密码'}).waitFor();
+  assert.equal(await page.locator('.merge-state').innerText(),'已向对方提供密码，本机密码未修改');assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);assert.equal(await page.evaluate(()=>window.__fixture.entries.length),1);await shot(page,'mobile-merged',{fullPage:false});
  },{mobile:true,merges:[incoming]});
+ await check('empty source is reported honestly and inconsistent empty results never report success',async page=>{
+  await page.locator('[data-tab=devices]').click();await page.evaluate(()=>Object.assign(window.__fixture.merges[0],{state:'completed',received_count:0,changed_count:0}));await tick(page);
+  assert.match(await page.locator('#notice').innerText(),/对方没有可接收的密码/);assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);
+  await page.evaluate(()=>{window.__fixture.merges.push({...window.__fixture.merges[0],id:'nonempty-result',received_count:2,changed_count:2});window.__fixture.entries=[];});await tick(page);
+  assert.match(await page.locator('#notice').innerText(),/请查看「历史恢复」核对/);assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);await page.locator('[data-tab=vault]').click();assert.equal(await page.locator('[data-entry]').count(),1);
+ },{merges:[{...incoming,direction:'outgoing'}]});
+ await check('a mismatched empty refresh preserves visible records and reports the problem',async page=>{
+  await page.evaluate(()=>{window.__fixture.entryCountOverride=1;window.__fixture.entries=[];});await tick(page);assert.match(await page.locator('#notice').innerText(),/密码列表未能完整读取/);assert.equal(await page.locator('[data-entry]').count(),1);
+ });
  await check('failed and expired merges never report success',async page=>{
   await page.locator('[data-tab=devices]').click();
   await page.evaluate(()=>Object.assign(window.__fixture.merges[0],{state:'failed',error:'对方未完成保存，请重试'}));await tick(page);await page.locator('#notice').filter({hasText:'对方未完成保存'}).waitFor();
@@ -186,7 +223,7 @@ try{
   await unlock(page);assert.equal(await page.getByText('已合并密码本',{exact:true}).count(),0);
  },{merges:[incoming]});
  await check('mobile layout remains usable without horizontal overflow',async page=>{
-  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).check();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).uncheck();assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);await shot(page,'mobile-vault',{fullPage:false});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).check();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.getByRole('switch',{name:'账号明文显示'}).uncheck();assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);await shot(page,'mobile-vault',{fullPage:false});await click(page,'recovery');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-recovery',{fullPage:false});await page.locator('[data-recovery-id]').click();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-recovery-history',{fullPage:false});await click(page,'close');
   await page.locator('[data-tab=devices]').click();await page.getByText('123456',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-devices',{fullPage:false});
   await page.evaluate(()=>{window.__fixture.discovered[0].name='A'.repeat(64);window.__fixture.merges[0].peer_name='B'.repeat(64);});await tick(page);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
  },{mobile:true,discovered:[peer],merges:[incoming]});

@@ -1,6 +1,6 @@
 //! The shared native shell for desktop, Android and iOS. Passwords only cross
 //! this local IPC bridge after an explicit action in the bundled UI.
-use ohmypassword_core::{Entry, EntryInput, EntrySummary, Status, Vault};
+use ohmypassword_core::{Entry, EntryInput, EntrySummary, Status, Vault, Version};
 use ohmypassword_service::{MergeSession, Service, ServiceConfig, ServiceStatus};
 use serde::Serialize;
 use std::net::IpAddr;
@@ -161,6 +161,32 @@ async fn entry_history(id: String, state: State<'_, Arc<AppState>>) -> NativeRes
     with_vault(state.inner().clone(), move |vault| vault.get_conflicts(&id)).await
 }
 #[tauri::command]
+async fn list_recovery_entries(state: State<'_, Arc<AppState>>) -> NativeResult<Vec<EntrySummary>> {
+    state.touch();
+    with_vault(state.inner().clone(), |vault| vault.list_recovery_entries()).await
+}
+#[tauri::command]
+async fn recovery_history(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<Vec<Entry>> {
+    state.touch();
+    with_vault(state.inner().clone(), move |vault| {
+        vault.recovery_history(&id)
+    })
+    .await
+}
+#[tauri::command]
+async fn restore_entry(
+    id: String,
+    version: Version,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Entry> {
+    let restored = with_vault(state.inner().clone(), move |vault| {
+        vault.restore_entry(&id, version)
+    })
+    .await?;
+    state.touch();
+    Ok(restored)
+}
+#[tauri::command]
 fn detect_devices(state: State<'_, Arc<AppState>>) -> NativeResult<()> {
     state.touch();
     state
@@ -239,6 +265,9 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             save_entry,
             delete_entry,
             entry_history,
+            list_recovery_entries,
+            recovery_history,
+            restore_entry,
             detect_devices,
             request_merge,
             respond_merge

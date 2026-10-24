@@ -10,3 +10,5 @@
 .account-toggle>input:checked{background:var(--green);border-color:var(--green)}
 .account-toggle>input:checked::before{transform:translateX(14px)}
 @media(max-width:650px){.toolbar{gap:12px}.toolbar>.search{flex-basis:100%;max-width:none}.toolbar>.count{margin-left:auto}}
+
+.recovery-entry{display:flex;width:100%;align-items:center;justify-content:space-between;gap:14px;text-align:left;padding:16px 10px;border-bottom:1px solid var(--line);border-radius:0}.recovery-entry>span:first-child{min-width:0}.recovery-entry strong,.recovery-entry small{display:block;overflow-wrap:anywhere}.recovery-entry small{margin-top:5px}.restore-history{display:block;margin-top:12px;font-size:12px}.history strong{overflow-wrap:anywhere}.history p{overflow-wrap:anywhere}

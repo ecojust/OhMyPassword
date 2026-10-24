@@ -1,5 +1,5 @@
-//! Local browser bridge and authenticated, encrypted peer synchronization.
-//! Discovery never grants access. Only paired peers can exchange vault records.
+//! Local browser bridge and manually approved, encrypted one-way vault import.
+//! Discovery never grants access. The provider is read-only during each transfer.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod discovery;
 mod manual;
@@ -40,6 +40,7 @@ pub enum Error {
     InvalidHost,
     InvalidRequest,
     InvalidEndpoint,
+    IncompatibleProtocol,
     Expired,
     Replay,
     Busy,
@@ -64,6 +65,8 @@ impl fmt::Display for Error {
                 Self::Replay => "重复消息已拒绝",
                 Self::Busy => "服务繁忙，请稍后重试",
                 Self::TooLarge => "密码库已达到同步容量上限",
+                Self::IncompatibleProtocol =>
+                    "设备版本不兼容，请先将两台设备升级到支持单向合并的同一版本",
                 Self::Unavailable => "设备暂不可达，请确认双方已解锁且位于同一局域网",
                 Self::Vault(e) => e,
                 Self::Io(_) => "无法启动服务，请检查端口是否已被占用",
@@ -276,13 +279,13 @@ impl Service {
                         .layer(DefaultBodyLimit::max(MAX_BODY))
                         .with_state(state.clone());
                     let lan_app = Router::new()
-                        .route("/v2/info", get(challenge))
-                        .route("/v2/merge/request", post(manual::request))
-                        .route("/v2/merge/reveal", post(manual::reveal))
-                        .route("/v2/merge/{id}/status", post(manual::session_status))
-                        .route("/v2/merge/{id}/exchange", post(manual::exchange))
-                        .route("/v2/merge/{id}/ack", post(manual::ack))
-                        .route("/v2/merge/{id}/cancel", post(manual::cancel))
+                        .route("/v3/info", get(challenge))
+                        .route("/v3/merge/request", post(manual::request))
+                        .route("/v3/merge/reveal", post(manual::reveal))
+                        .route("/v3/merge/{id}/status", post(manual::session_status))
+                        .route("/v3/merge/{id}/pull", post(manual::pull))
+                        .route("/v3/merge/{id}/ack", post(manual::ack))
+                        .route("/v3/merge/{id}/cancel", post(manual::cancel))
                         .fallback(|| async { Error::InvalidRequest })
                         .layer(axum::middleware::from_fn_with_state(
                             state.clone(),
@@ -733,7 +736,7 @@ async fn challenge(State(state): State<Arc<Inner>>) -> Result<Json<Challenge>> {
     let vault = lock(&state.vault)?;
     let own = vault.status();
     Ok(Json(Challenge {
-        protocol: 2,
+        protocol: 3,
         device_id: own.device_id,
         name: own.device_name,
         epoch: lock(&state.epoch)?.clone(),
@@ -774,13 +777,18 @@ async fn response_json<T: serde::de::DeserializeOwned>(
 async fn fetch_challenge(state: &Inner, address: SocketAddr, id: &str) -> Result<Challenge> {
     let response = state
         .client
-        .get(format!("{}/v2/info", endpoint(address)))
+        .get(format!("{}/v3/info", endpoint(address)))
         .send()
         .await
         .map_err(|_| Error::Unavailable)?;
+    if matches!(response.status().as_u16(), 400 | 404) {
+        return Err(Error::IncompatibleProtocol);
+    }
     let info: Challenge = response_json(response).await?;
-    if info.protocol != 2 || info.device_id != id || !valid_id(&info.epoch) || info.name.len() > 128
-    {
+    if info.protocol != 3 {
+        return Err(Error::IncompatibleProtocol);
+    }
+    if info.device_id != id || !valid_id(&info.epoch) || info.name.len() > 128 {
         return Err(Error::Authentication);
     }
     Ok(info)

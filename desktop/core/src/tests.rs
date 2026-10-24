@@ -709,3 +709,218 @@ fn merge_write_lease_is_not_persisted_across_process_restarts() {
     reopened.upsert(revised(&entry, "after-restart")).unwrap();
     assert_eq!(reopened.get(&entry.id).unwrap().password, "after-restart");
 }
+
+fn backup_paths(dir: &Path) -> Vec<PathBuf> {
+    match fs::read_dir(dir.join("backups")) {
+        Ok(entries) => entries.map(|entry| entry.unwrap().path()).collect(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(err) => panic!("cannot list recovery snapshots: {err}"),
+    }
+}
+
+#[test]
+fn empty_requester_pulls_live_accounts_without_modifying_provider() {
+    let (source_dir, mut source) = ready();
+    let first = source.upsert(input("one.example", "first-private-password")).unwrap();
+    source.upsert(revised(&first, "updated-private-password")).unwrap();
+    source.upsert(input("two.example", "second-private-password")).unwrap();
+    let deleted = source.upsert(input("deleted.example", "deleted-private-password")).unwrap();
+    source.delete(&deleted.id).unwrap();
+    let (target_dir, mut target) = ready();
+    let source_before = fs::read(source_dir.path().join("vault.json")).unwrap();
+    let target_before = fs::read(target_dir.path().join("vault.json")).unwrap();
+    let payload = source.export_pull().unwrap();
+    assert_eq!(payload.records.len(), 2);
+    assert!(payload.records.iter().all(|entry| !entry.deleted));
+    assert!(!serde_json::to_string(&payload).unwrap().contains("first-private-password"));
+    assert_eq!(target.import_pull(payload).unwrap().changed, 2);
+    assert_eq!(source.list(None).unwrap().len(), 2);
+    assert_eq!(target.list(None).unwrap().len(), 2);
+    assert_eq!(source.get(&first.id).unwrap().password, "updated-private-password");
+    assert_eq!(target.get(&first.id).unwrap().password, "updated-private-password");
+    assert_eq!(fs::read(source_dir.path().join("vault.json")).unwrap(), source_before);
+    assert!(backup_paths(source_dir.path()).is_empty());
+    let backups = backup_paths(target_dir.path());
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read(backups[0].join("vault.json")).unwrap(), target_before);
+    assert_eq!(fs::read(backups[0].join("identity.json")).unwrap(), fs::read(target_dir.path().join("identity.json")).unwrap());
+    let mut snapshot = Vault::open(backups[0].clone()).unwrap();
+    snapshot.unlock(PASSWORD).unwrap();
+    assert!(snapshot.list(None).unwrap().is_empty());
+    let after = fs::read(target_dir.path().join("vault.json")).unwrap();
+    assert_eq!(target.import_pull(source.export_pull().unwrap()).unwrap().changed, 0);
+    assert_eq!(target.import_pull(SyncPayload { version: FORMAT, records: vec![] }).unwrap().changed, 0);
+    assert_eq!(fs::read(target_dir.path().join("vault.json")).unwrap(), after);
+    assert_eq!(backup_paths(target_dir.path()).len(), 1);
+}
+
+#[test]
+fn pulling_keeps_unrelated_local_records_and_newer_local_passwords() {
+    let (dir, mut vault) = ready();
+    let local = vault.upsert(input("local.example", "keep-this-local-password")).unwrap();
+    let first = vault.upsert(input("shared.example", "old-shared-password")).unwrap();
+    let latest = vault.upsert(revised(&first, "newer-local-password")).unwrap();
+    let mut older_remote = first.clone();
+    older_remote.version.device_id = Uuid::new_v4().to_string();
+    older_remote.password = "older-remote-password".to_owned();
+    let result = vault.import_pull(SyncPayload { version: FORMAT, records: vec![older_remote] }).unwrap();
+    assert_eq!(result.changed, 1);
+    assert_eq!(vault.list(None).unwrap().len(), 2);
+    assert_eq!(vault.get(&local.id).unwrap().password, "keep-this-local-password");
+    assert_eq!(vault.get(&first.id).unwrap().password, "newer-local-password");
+    assert_eq!(vault.recovery_history(&first.id).unwrap().len(), 3);
+    let mut newer_remote = latest.clone();
+    newer_remote.version.modified_at += 10;
+    newer_remote.version.counter += 1;
+    newer_remote.version.device_id = Uuid::new_v4().to_string();
+    newer_remote.password = "newer-remote-password".to_owned();
+    assert_eq!(vault.import_pull(SyncPayload { version: FORMAT, records: vec![newer_remote] }).unwrap().changed, 1);
+    assert_eq!(vault.get(&first.id).unwrap().password, "newer-remote-password");
+    assert_eq!(vault.get(&local.id).unwrap().password, "keep-this-local-password");
+    assert_eq!(backup_paths(dir.path()).len(), 2);
+}
+
+#[test]
+fn pull_rejects_remote_deletions_duplicates_and_invalid_batches_atomically() {
+    let (dir, mut vault) = ready();
+    let original = vault.upsert(input("example.com", "must-survive-pull")).unwrap();
+    let mut valid = original.clone();
+    valid.id = Uuid::new_v4().to_string();
+    let mut deleted = original.clone();
+    deleted.deleted = true;
+    deleted.title.clear(); deleted.username.clear(); deleted.password.clear(); deleted.notes.clear();
+    deleted.version.modified_at += 10;
+    let mut future = valid.clone();
+    future.version.modified_at = now_ms().unwrap() + MAX_FUTURE_MS + 60_000;
+    let before = fs::read(dir.path().join("vault.json")).unwrap();
+    for records in [vec![valid.clone(), deleted], vec![valid.clone(), valid.clone()], vec![future]] {
+        assert!(vault.import_pull(SyncPayload { version: FORMAT, records }).is_err());
+        assert_eq!(vault.get(&original.id).unwrap().password, "must-survive-pull");
+        assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
+        assert!(backup_paths(dir.path()).is_empty());
+    }
+    let mut oversized = Vec::new();
+    for _ in 0..40 {
+        let mut entry = valid.clone();
+        entry.id = Uuid::new_v4().to_string();
+        entry.notes = "x".repeat(32 * 1024);
+        oversized.push(entry);
+    }
+    assert!(vault.import_pull(SyncPayload { version: FORMAT, records: oversized }).unwrap_err().is_capacity_limit());
+    assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
+    assert!(backup_paths(dir.path()).is_empty());
+}
+
+#[test]
+fn deleted_records_remain_globally_recoverable_and_restore_as_new_local_edits() {
+    let (dir, mut vault) = ready();
+    let first = vault.upsert(input("example.com", "original-recoverable-password")).unwrap();
+    let second = vault.upsert(revised(&first, "second-recoverable-password")).unwrap();
+    vault.delete(&first.id).unwrap();
+    let deleted_version = vault.export_sync().unwrap().records.last().unwrap().version.clone();
+    assert!(vault.list(None).unwrap().is_empty());
+    let recoverable = vault.list_recovery_entries().unwrap();
+    assert_eq!(recoverable.len(), 1);
+    assert!(recoverable[0].deleted);
+    assert_eq!(recoverable[0].username, first.username);
+    assert!(!serde_json::to_string(&recoverable).unwrap().contains("recoverable-password"));
+    let history = vault.recovery_history(&first.id).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].version, second.version);
+    assert_eq!(history[1].version, first.version);
+    let before = fs::read(dir.path().join("vault.json")).unwrap();
+    assert!(vault.restore_entry(&first.id, deleted_version.clone()).is_err());
+    assert!(vault.restore_entry("missing", first.version.clone()).is_err());
+    assert!(backup_paths(dir.path()).is_empty());
+    let restored = vault.restore_entry(&first.id, first.version.clone()).unwrap();
+    assert_eq!(restored.password, "original-recoverable-password");
+    assert_eq!(restored.id, first.id);
+    assert_eq!(restored.version.device_id, vault.status().device_id);
+    assert!(restored.version > deleted_version);
+    assert_eq!(vault.recovery_history(&first.id).unwrap().len(), 3);
+    let backups = backup_paths(dir.path());
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read(backups[0].join("vault.json")).unwrap(), before);
+    assert!(!String::from_utf8(before).unwrap().contains("recoverable-password"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(backups[0].join("vault.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(backups[0].join("identity.json")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    drop(vault);
+    let mut reopened = Vault::open(dir.path().to_path_buf()).unwrap();
+    reopened.unlock(PASSWORD).unwrap();
+    assert_eq!(reopened.get(&first.id).unwrap().password, "original-recoverable-password");
+    let mut snapshot = Vault::open(backups[0].clone()).unwrap();
+    snapshot.unlock(PASSWORD).unwrap();
+    assert!(snapshot.list(None).unwrap().is_empty());
+    assert_eq!(snapshot.recovery_history(&first.id).unwrap().len(), 2);
+}
+
+#[test]
+fn newer_local_deletion_requires_explicit_restore_even_after_pull() {
+    let (_dir, mut vault) = ready();
+    let entry = vault.upsert(input("example.com", "locally-deleted-password")).unwrap();
+    vault.delete(&entry.id).unwrap();
+    let mut remote = entry.clone();
+    remote.version.device_id = Uuid::new_v4().to_string();
+    remote.password = "recover-only-on-request".to_owned();
+    assert_eq!(vault.import_pull(SyncPayload { version: FORMAT, records: vec![remote.clone()] }).unwrap().changed, 1);
+    assert!(vault.list(None).unwrap().is_empty());
+    assert!(vault.list_recovery_entries().unwrap()[0].deleted);
+    let restored = vault.restore_entry(&entry.id, remote.version.clone()).unwrap();
+    assert_eq!(restored.password, "recover-only-on-request");
+    assert_eq!(vault.list(None).unwrap().len(), 1);
+}
+
+#[test]
+fn backup_or_persist_failure_leaves_import_and_restore_unchanged() {
+    let (dir, mut vault) = ready();
+    let entry = vault.upsert(input("example.com", "original-safe-password")).unwrap();
+    vault.delete(&entry.id).unwrap();
+    let before = fs::read(dir.path().join("vault.json")).unwrap();
+    let mut incoming = entry.clone();
+    incoming.id = Uuid::new_v4().to_string();
+    let payload = SyncPayload { version: FORMAT, records: vec![incoming] };
+    fs::write(dir.path().join("backups"), b"not-a-directory").unwrap();
+    assert!(vault.import_pull(payload.clone()).is_err());
+    assert!(vault.restore_entry(&entry.id, entry.version.clone()).is_err());
+    assert!(vault.list(None).unwrap().is_empty());
+    assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
+    fs::remove_file(dir.path().join("backups")).unwrap();
+    fs::create_dir(dir.path().join(".vault.json.new")).unwrap();
+    assert!(vault.import_pull(payload).is_err());
+    assert!(vault.restore_entry(&entry.id, entry.version.clone()).is_err());
+    assert!(vault.list(None).unwrap().is_empty());
+    assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
+    let backups = backup_paths(dir.path());
+    assert_eq!(backups.len(), 2);
+    assert!(backups.iter().all(|backup| fs::read(backup.join("vault.json")).unwrap() == before));
+}
+
+#[test]
+fn backup_limit_preserves_first_snapshot_and_lock_blocks_recovery() {
+    let (dir, mut vault) = ready();
+    let entry = vault.upsert(input("example.com", "recovery-secret")).unwrap();
+    vault.delete(&entry.id).unwrap();
+    fs::create_dir(dir.path().join("backups")).unwrap();
+    for index in 0..MAX_RECOVERY_BACKUPS {
+        fs::write(dir.path().join("backups").join(format!("preserved-{index}")), b"preserved").unwrap();
+    }
+    let before = fs::read(dir.path().join("vault.json")).unwrap();
+    assert!(vault.restore_entry(&entry.id, entry.version.clone()).err().unwrap().to_string().contains("64"));
+    assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
+    assert_eq!(fs::read(dir.path().join("backups/preserved-0")).unwrap(), b"preserved");
+    vault.begin_merge_write("waiting-receipt").unwrap();
+    assert!(vault.restore_entry(&entry.id, entry.version.clone()).is_err());
+    assert!(vault.import_pull(SyncPayload { version: FORMAT, records: vec![entry.clone()] }).is_err());
+    assert_eq!(vault.recovery_history(&entry.id).unwrap().len(), 1);
+    vault.lock();
+    assert!(vault.list_recovery_entries().is_err());
+    assert!(vault.recovery_history(&entry.id).is_err());
+    assert!(vault.restore_entry(&entry.id, entry.version.clone()).is_err());
+    assert!(vault.export_pull().is_err());
+    assert!(vault.import_pull(SyncPayload { version: FORMAT, records: vec![] }).is_err());
+}

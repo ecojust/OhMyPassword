@@ -352,27 +352,57 @@ fn discovery_resume_timer_and_browser_save_never_merge_passwords() {
 }
 
 #[test]
-fn both_manual_confirmations_merge_then_future_edits_stay_local() {
-    let (_ad, a, sa) = fixture("A");
-    let (_bd, b, sb) = fixture("B");
+fn empty_requester_pulls_passwords_without_changing_the_provider() {
+    let (_ad, a, sa) = fixture("New device");
+    let (bd, b, sb) = fixture("Existing device");
     discover(&a, &sa, &b, &sb);
-    let original = a
+    let original = b
         .lock()
         .unwrap()
         .upsert(entry("example.com", "old-secret"))
         .unwrap();
+    b.lock()
+        .unwrap()
+        .upsert(entry("second.example", "second-secret"))
+        .unwrap();
+    let provider_file = std::fs::read(bd.path().join("vault.json")).unwrap();
+    let provider_identity = std::fs::read(bd.path().join("identity.json")).unwrap();
+    let provider_records = serde_json::to_vec(&b.lock().unwrap().export_sync().unwrap()).unwrap();
     let id = begin(&sa, &b, &sb);
     thread::sleep(Duration::from_millis(300));
-    assert!(b.lock().unwrap().list(None).unwrap().is_empty());
+    assert!(a.lock().unwrap().list(None).unwrap().is_empty());
     sa.respond_merge(&id, true).unwrap();
     thread::sleep(Duration::from_millis(300));
-    assert!(b.lock().unwrap().list(None).unwrap().is_empty());
+    assert!(a.lock().unwrap().list(None).unwrap().is_empty());
     sb.respond_merge(&id, true).unwrap();
     eventually(|| session(&sa, &id).state == "completed" && session(&sb, &id).state == "completed");
+    assert_eq!(a.lock().unwrap().list(None).unwrap().len(), 2);
     assert_eq!(
-        b.lock().unwrap().get(&original.id).unwrap().password,
+        a.lock().unwrap().get(&original.id).unwrap().password,
         "old-secret"
     );
+    assert_eq!(
+        std::fs::read(bd.path().join("vault.json")).unwrap(),
+        provider_file
+    );
+    assert_eq!(
+        std::fs::read(bd.path().join("identity.json")).unwrap(),
+        provider_identity
+    );
+    assert_eq!(
+        serde_json::to_vec(&b.lock().unwrap().export_sync().unwrap()).unwrap(),
+        provider_records
+    );
+    assert_eq!(session(&sa, &id).received_count, Some(2));
+    assert_eq!(session(&sa, &id).changed_count, Some(2));
+    assert_eq!(session(&sb, &id).source_count, Some(2));
+    assert_eq!(session(&sb, &id).received_count, None);
+    assert_eq!(
+        std::fs::read_dir(bd.path()).unwrap().count(),
+        3,
+        "Provider must not even create a backup or write sidecar."
+    );
+
     let mut input = entry("example.com", "newest-secret");
     input.id = Some(original.id.clone());
     b.lock().unwrap().upsert(input).unwrap();
@@ -391,8 +421,134 @@ fn both_manual_confirmations_merge_then_future_edits_stay_local() {
     b.lock().unwrap().delete(&original.id).unwrap();
     let third = begin(&sa, &b, &sb);
     complete(&sa, &sb, &third);
-    assert!(a.lock().unwrap().list(None).unwrap().is_empty());
+    assert_eq!(
+        a.lock().unwrap().get(&original.id).unwrap().password,
+        "newest-secret",
+        "Source deletion is never imported."
+    );
+    assert_eq!(a.lock().unwrap().list(None).unwrap().len(), 2);
+    assert_eq!(b.lock().unwrap().list(None).unwrap().len(), 1);
     assert!(sa.respond_merge(&id, true).is_err());
+}
+
+#[test]
+fn requester_records_and_deletions_never_reach_the_provider() {
+    let (_ad, a, sa) = fixture("Requester");
+    let (bd, b, sb) = fixture("Provider");
+    discover(&a, &sa, &b, &sb);
+    let from_provider = b
+        .lock()
+        .unwrap()
+        .upsert(entry("source.example", "source-secret"))
+        .unwrap();
+    let first = begin(&sa, &b, &sb);
+    complete(&sa, &sb, &first);
+    a.lock().unwrap().delete(&from_provider.id).unwrap();
+    let local = a
+        .lock()
+        .unwrap()
+        .upsert(entry("local.example", "never-send-back"))
+        .unwrap();
+    let before = std::fs::read(bd.path().join("vault.json")).unwrap();
+    let second = begin(&sa, &b, &sb);
+    complete(&sa, &sb, &second);
+    assert_eq!(
+        a.lock().unwrap().get(&local.id).unwrap().password,
+        "never-send-back"
+    );
+    assert_eq!(
+        b.lock().unwrap().get(&from_provider.id).unwrap().password,
+        "source-secret"
+    );
+    assert!(b.lock().unwrap().get(&local.id).is_err());
+    assert_eq!(std::fs::read(bd.path().join("vault.json")).unwrap(), before);
+    let source = b.lock().unwrap().export_sync().unwrap();
+    assert!(!source
+        .records
+        .iter()
+        .any(|record| record.deleted || record.id == local.id));
+}
+
+#[test]
+fn empty_provider_and_failed_local_save_cannot_clear_either_vault_or_report_completion() {
+    let (ad, a, sa) = fixture("Requester");
+    let (bd, b, sb) = fixture("Provider");
+    discover(&a, &sa, &b, &sb);
+    let local = a
+        .lock()
+        .unwrap()
+        .upsert(entry("local.example", "keep-local"))
+        .unwrap();
+    let local_before = std::fs::read(ad.path().join("vault.json")).unwrap();
+    let source_before = std::fs::read(bd.path().join("vault.json")).unwrap();
+    let empty = begin(&sa, &b, &sb);
+    complete(&sa, &sb, &empty);
+    assert_eq!(session(&sa, &empty).received_count, Some(0));
+    assert_eq!(session(&sa, &empty).changed_count, Some(0));
+    assert_eq!(
+        std::fs::read(ad.path().join("vault.json")).unwrap(),
+        local_before
+    );
+    assert_eq!(
+        std::fs::read(bd.path().join("vault.json")).unwrap(),
+        source_before
+    );
+    b.lock()
+        .unwrap()
+        .upsert(entry("source.example", "keep-source"))
+        .unwrap();
+    let source_before = std::fs::read(bd.path().join("vault.json")).unwrap();
+    std::fs::rename(
+        ad.path().join("vault.json"),
+        ad.path().join("saved-vault.json"),
+    )
+    .unwrap();
+    std::fs::create_dir(ad.path().join("vault.json")).unwrap();
+    let failed = begin(&sa, &b, &sb);
+    sa.respond_merge(&failed, true).unwrap();
+    sb.respond_merge(&failed, true).unwrap();
+    eventually(|| session(&sa, &failed).state == "failed");
+    assert_ne!(session(&sb, &failed).state, "completed");
+    assert_eq!(
+        a.lock().unwrap().get(&local.id).unwrap().password,
+        "keep-local"
+    );
+    assert_eq!(a.lock().unwrap().list(None).unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read(bd.path().join("vault.json")).unwrap(),
+        source_before
+    );
+    assert_eq!(
+        std::fs::read(ad.path().join("saved-vault.json")).unwrap(),
+        local_before
+    );
+}
+
+#[test]
+fn legacy_bidirectional_routes_and_protocols_are_rejected() {
+    let (dir, vault, service) = fixture("V3 provider");
+    let before = std::fs::read(dir.path().join("vault.json")).unwrap();
+    runtime().block_on(async {
+        let c = client();
+        let base = format!("http://127.0.0.1:{}", service.status().lan_port);
+        for path in ["/v2/info", "/v2/merge/request", "/v2/merge/example/exchange"] {
+            let response = c.post(format!("{base}{path}")).json(&serde_json::json!({})).send().await.unwrap();
+            assert!(!response.status().is_success());
+        }
+        let info: serde_json::Value = c.get(format!("{base}/v3/info")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(info["protocol"], 3);
+        let response = c.post(format!("{base}/v3/merge/request")).json(&serde_json::json!({
+            "protocol": 2, "id":random_id(), "from":random_id(), "to":vault.lock().unwrap().status().device_id,
+            "name":"Old client", "endpoint":"http://127.0.0.1:17842", "from_epoch":random_id(),
+            "to_epoch":info["epoch"], "commitment":encode(random_key())
+        })).send().await.unwrap();
+        assert_eq!(response.status(), 400);
+    });
+    assert!(service.status().merges.is_empty());
+    assert_eq!(
+        std::fs::read(dir.path().join("vault.json")).unwrap(),
+        before
+    );
 }
 
 #[test]
@@ -454,7 +610,7 @@ fn discovery_does_not_grant_access_and_shutdown_remains_bounded() {
     service.discovered_peer(&random_id(), "8.8.8.8:19001".parse().unwrap());
     assert_eq!(service.status().discovered.len(), 1);
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, service.status().lan_port)).unwrap();
-    socket.write_all(b"POST /v2/merge/request HTTP/1.1\r\nHost: localhost\r\nContent-Length: 99999\r\nContent-Type: application/json\r\n\r\n{").unwrap();
+    socket.write_all(b"POST /v3/merge/request HTTP/1.1\r\nHost: localhost\r\nContent-Length: 99999\r\nContent-Type: application/json\r\n\r\n{").unwrap();
     thread::sleep(Duration::from_millis(60));
     let time = Instant::now();
     drop(service);
