@@ -32,6 +32,7 @@ use tokio::sync::{watch, Notify, Semaphore};
 use zeroize::Zeroize;
 
 pub type Result<T> = std::result::Result<T, Error>;
+const DISCOVERY_DURATION_SECS: u64 = 20;
 #[derive(Debug)]
 pub enum Error {
     Authentication,
@@ -163,6 +164,8 @@ pub struct ServiceStatus {
     pub last_discovery_at: Option<u64>,
     pub next_discovery_at: Option<u64>,
     pub discovering: bool,
+    pub discovery_duration_secs: u64,
+    pub discovery_remaining_secs: u64,
     pub merges: Vec<MergeSession>,
     pub last_error: Option<String>,
     pub discovered: Vec<DiscoveredPeer>,
@@ -237,6 +240,8 @@ impl Service {
                 last_discovery_at: None,
                 next_discovery_at: None,
                 discovering: false,
+                discovery_duration_secs: DISCOVERY_DURATION_SECS,
+                discovery_remaining_secs: 0,
                 merges: vec![],
                 last_error: None,
                 discovered: vec![],
@@ -347,13 +352,23 @@ impl Service {
                 last_discovery_at: None,
                 next_discovery_at: None,
                 discovering: false,
+                discovery_duration_secs: DISCOVERY_DURATION_SECS,
+                discovery_remaining_secs: 0,
                 discovered: vec![],
                 merges: vec![],
             });
         status.running =
             self.inner.active.load(Ordering::Acquire) && !*self.inner.shutdown.borrow();
-        status.discovering =
-            status.running && status.last_discovery_at.is_some_and(|at| now() < at + 20);
+        status.discovery_remaining_secs = if status.running {
+            status.last_discovery_at.map_or(0, |at| {
+                at.saturating_add(DISCOVERY_DURATION_SECS)
+                    .saturating_sub(now())
+                    .min(DISCOVERY_DURATION_SECS)
+            })
+        } else {
+            0
+        };
+        status.discovering = status.discovery_remaining_secs > 0;
         if let Ok(mut found) = self.inner.discovered.lock() {
             found.retain(|_, p| now().saturating_sub(p.last_seen) < 660);
             status.discovered = found.values().cloned().collect();
@@ -378,6 +393,7 @@ impl Service {
         manual::abort_sessions(&self.inner, "密码库已锁定，合并已取消");
         if let Ok(mut status) = self.inner.status.lock() {
             status.discovering = false;
+            status.discovery_remaining_secs = 0;
             status.last_discovery_at = None;
             status.next_discovery_at = None;
             status.last_error = None;
@@ -450,10 +466,12 @@ impl Inner {
             return;
         }
         if let Ok(mut status) = self.status.lock() {
+            let started = now();
             status.discovery_generation = status.discovery_generation.saturating_add(1);
-            status.last_discovery_at = Some(now());
-            status.next_discovery_at = Some(now() + self.discovery_interval_secs);
+            status.last_discovery_at = Some(started);
+            status.next_discovery_at = Some(started + self.discovery_interval_secs);
             status.discovering = true;
+            status.discovery_remaining_secs = DISCOVERY_DURATION_SECS;
         }
         self.detect_trigger.notify_one();
     }

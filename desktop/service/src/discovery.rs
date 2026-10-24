@@ -45,7 +45,8 @@ impl Discovery {
                         thread::sleep(Duration::from_millis(150));
                         continue;
                     };
-                    let until = Instant::now() + Duration::from_secs(20);
+                    let until =
+                        Instant::now() + Duration::from_secs(crate::DISCOVERY_DURATION_SECS);
                     while Instant::now() < until
                         && state.ensure_active().is_ok()
                         && !*state.shutdown.borrow()
