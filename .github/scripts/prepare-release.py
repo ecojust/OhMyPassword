@@ -154,6 +154,7 @@ def prepare(manifest, target, repository):
         (output / "BUILD-NOTES.txt").write_text(
             f"OhMyPassword {data['tag']}\nRelease target: {target}\nRepository: {repository}\n\n"
             "Android APK: optimized development/debug build, signed with an Android Debug key; not a store release.\n"
+            "Android development keys may differ across builds and prevent in-place updates; preserve existing vault data before replacing an installation.\n"
             "iOS ZIP: ARM64 Simulator app only, not installable on a physical iPhone. Device distribution requires Apple signing and provisioning.\n"
             "macOS DMG: ARM64, ad-hoc signed, not Apple-notarized.\n"
             "Windows needs WebView2; Linux needs compatible GTK/WebKitGTK system libraries.\n"

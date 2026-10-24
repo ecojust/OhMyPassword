@@ -71,7 +71,7 @@ size optimization does not create a production-signed release. Compare actual
 collected APK bytes rather than the outer Actions artifact ZIP size.
 
 The build workflow uploads artifacts without publishing a Release. The APK uses a development
-signing key. The iOS archive contains a Simulator `.app`, not an iPhone install
+signing key that is not persisted between CI builds; APKs signed by different keys cannot update one another. Preserve existing vault data before replacing a development installation. The iOS archive contains a Simulator `.app`, not an iPhone install
 package; physical-device distribution needs Apple signing and provisioning.
 macOS bundles have ad-hoc signatures and are not Apple-notarized. Desktop
 startup and mobile compilation do not demonstrate real-device LAN discovery,
@@ -88,9 +88,9 @@ to a draft Release. It also checks the uploaded asset inventory and any SHA256
 digests returned by GitHub. Existing releases with the same tag are left intact.
 
 ```sh
-gh workflow run release.yml --ref master -f tag=v0.1.0
+gh workflow run release.yml --ref master -f tag=v0.2.0
 # After verifying the prepared draft and its assets:
-gh release edit v0.1.0 --repo ecojust/OhMyPassword --draft=false --latest
+gh release edit v0.2.0 --repo ecojust/OhMyPassword --draft=false --latest
 ```
 
 This workflow packages existing verified binaries; it does not rebuild the
