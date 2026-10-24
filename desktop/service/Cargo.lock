@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "ohmypassword-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "ohmypassword-service"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm",
  "axum",

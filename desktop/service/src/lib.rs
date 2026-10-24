@@ -9,7 +9,7 @@ pub use manual::MergeSession;
 
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, DefaultBodyLimit, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Extension, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -23,7 +23,7 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -206,6 +206,10 @@ struct Inner {
     discovery_interval_secs: u64,
     enable_lan_scan: bool,
     active: AtomicBool,
+    browser_active: AtomicBool,
+    browser_generation: AtomicU64,
+    #[cfg(test)]
+    browser_waiters: std::sync::atomic::AtomicUsize,
     shutdown: watch::Sender<bool>,
     detect_trigger: Notify,
     epoch: Mutex<String>,
@@ -250,6 +254,10 @@ impl Service {
             discovery_interval_secs: config.discovery_interval_secs.max(1),
             enable_lan_scan: config.enable_lan_scan,
             active: AtomicBool::new(true),
+            browser_active: AtomicBool::new(true),
+            browser_generation: AtomicU64::new(0),
+            #[cfg(test)]
+            browser_waiters: std::sync::atomic::AtomicUsize::new(0),
             shutdown,
             detect_trigger: Notify::new(),
             epoch: Mutex::new(random_id()),
@@ -435,6 +443,13 @@ impl Service {
         Ok(())
     }
     pub fn pause(&self) {
+        self.inner.browser_active.store(false, Ordering::Release);
+        self.inner.browser_generation.fetch_add(1, Ordering::AcqRel);
+        self.pause_lan();
+    }
+    /// Suspend discovery and merges while keeping an already-enabled browser bridge.
+    /// This does not unlock the vault or reactivate a fully paused browser bridge.
+    pub fn pause_lan(&self) {
         self.inner.active.store(false, Ordering::Release);
         if let Ok(mut epoch) = self.inner.epoch.lock() {
             *epoch = random_id();
@@ -458,8 +473,16 @@ impl Service {
         self.inner.detect_trigger.notify_one();
     }
     pub fn resume(&self) {
+        self.inner.browser_active.store(true, Ordering::Release);
         self.inner.active.store(true, Ordering::Release);
         self.inner.request_detection();
+    }
+    pub fn browser_available(&self) -> bool {
+        if self.inner.ensure_browser_active().is_err() {
+            return false;
+        }
+        lock(&self.inner.vault)
+            .is_ok_and(|vault| !vault.status().locked && self.inner.ensure_browser_active().is_ok())
     }
     pub fn discovered_peer(&self, id: &str, endpoint: SocketAddr) {
         self.inner.discovered_peer(id, "", endpoint);
@@ -472,6 +495,7 @@ impl Service {
 impl Drop for Service {
     fn drop(&mut self) {
         self.inner.shutdown.send_replace(true);
+        self.inner.browser_active.store(false, Ordering::Release);
         self.inner.active.store(false, Ordering::Release);
         manual::abort_sessions(&self.inner, "服务已停止");
         if let Ok(mut join) = self.thread.lock() {
@@ -482,6 +506,35 @@ impl Drop for Service {
     }
 }
 impl Inner {
+    fn ensure_browser_active(&self) -> Result<()> {
+        if !self.browser_active.load(Ordering::Acquire) || *self.shutdown.borrow() {
+            Err(Error::Locked)
+        } else {
+            Ok(())
+        }
+    }
+    fn ensure_browser_request(&self, access: BrowserAccess) -> Result<()> {
+        self.ensure_browser_active()?;
+        if self.browser_generation.load(Ordering::Acquire) != access.generation {
+            Err(Error::Locked)
+        } else {
+            Ok(())
+        }
+    }
+    fn browser_vault(&self, access: BrowserAccess) -> Result<std::sync::MutexGuard<'_, Vault>> {
+        self.ensure_browser_request(access)?;
+        #[cfg(test)]
+        self.browser_waiters.fetch_add(1, Ordering::AcqRel);
+        let vault = lock(&self.vault);
+        #[cfg(test)]
+        self.browser_waiters.fetch_sub(1, Ordering::AcqRel);
+        let vault = vault?;
+        self.ensure_browser_request(access)?;
+        if vault.status().locked {
+            return Err(Error::Locked);
+        }
+        Ok(vault)
+    }
     fn ensure_active(&self) -> Result<()> {
         if !self.active.load(Ordering::Acquire) || *self.shutdown.borrow() {
             Err(Error::Locked)
@@ -545,6 +598,9 @@ impl Inner {
             return;
         }
         if let Ok(mut status) = self.status.lock() {
+            if self.ensure_active().is_err() {
+                return;
+            }
             let started = now();
             status.discovery_generation = status.discovery_generation.saturating_add(1);
             status.last_discovery_at = Some(started);
@@ -601,7 +657,16 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
         .and_then(|v| v.to_str().ok())
         .ok_or(Error::InvalidRequest)
 }
-fn local_origin(state: &Inner, headers: &HeaderMap, public: bool) -> Result<Option<String>> {
+#[derive(Clone, Copy)]
+struct BrowserAccess {
+    generation: u64,
+}
+fn local_origin(
+    state: &Inner,
+    headers: &HeaderMap,
+    public: bool,
+    access: BrowserAccess,
+) -> Result<Option<String>> {
     let host = header(headers, "host").map_err(|_| Error::InvalidHost)?;
     if host != format!("127.0.0.1:{}", state.local_port)
         && host != format!("localhost:{}", state.local_port)
@@ -617,11 +682,7 @@ fn local_origin(state: &Inner, headers: &HeaderMap, public: bool) -> Result<Opti
         return Err(Error::ForbiddenOrigin);
     }
     if !public {
-        state.ensure_active()?;
-        let vault = lock(&state.vault)?;
-        if vault.status().locked {
-            return Err(Error::Locked);
-        }
+        drop(state.browser_vault(access)?);
     }
     Ok(Some(origin.into()))
 }
@@ -637,11 +698,14 @@ fn cors(response: &mut Response, origin: &str) {
 }
 async fn local_middleware(
     State(state): State<Arc<Inner>>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     let public = request.uri().path() == "/v1/status";
-    let origin = match local_origin(&state, request.headers(), public) {
+    let access = BrowserAccess {
+        generation: state.browser_generation.load(Ordering::Acquire),
+    };
+    let origin = match local_origin(&state, request.headers(), public, access) {
         Ok(origin) => origin,
         Err(error) => {
             let mut response = error.into_response();
@@ -656,6 +720,7 @@ async fn local_middleware(
             return response;
         }
     };
+    request.extensions_mut().insert(access);
     let mut response = if request.method() == Method::OPTIONS {
         let method = request
             .headers()
@@ -704,6 +769,11 @@ async fn local_middleware(
             Err(_) => Error::Busy.into_response(),
         }
     };
+    // A fully locked/restarted bridge must not return credentials prepared by an
+    // older request. A LAN-only pause intentionally leaves this generation intact.
+    if !public && state.ensure_browser_request(access).is_err() {
+        response = Error::Locked.into_response();
+    }
     if let Some(origin) = origin {
         cors(&mut response, &origin);
     }
@@ -755,32 +825,29 @@ async fn lan_middleware(
 fn authorize<'a>(
     state: &'a Inner,
     headers: &HeaderMap,
+    access: BrowserAccess,
 ) -> Result<std::sync::MutexGuard<'a, Vault>> {
-    state.ensure_active()?;
+    state.ensure_browser_request(access)?;
     let origin = header(headers, "origin").map_err(|_| Error::ForbiddenOrigin)?;
     if !extension_origin(origin) {
         return Err(Error::ForbiddenOrigin);
     }
-    let vault = lock(&state.vault)?;
-    if vault.status().locked {
-        return Err(Error::Locked);
-    }
-    state.ensure_active()?;
-    Ok(vault)
+    state.browser_vault(access)
 }
 
 async fn local_status(State(state): State<Arc<Inner>>) -> Result<Json<serde_json::Value>> {
     let vault = lock(&state.vault)?;
     let status = vault.status();
     Ok(Json(
-        serde_json::json!({"protocol":2,"initialized":status.initialized,"locked":status.locked||state.ensure_active().is_err()}),
+        serde_json::json!({"protocol":2,"initialized":status.initialized,"locked":status.locked||state.ensure_browser_active().is_err()}),
     ))
 }
 async fn browser_connect(
     State(state): State<Arc<Inner>>,
+    Extension(access): Extension<BrowserAccess>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>> {
-    let _vault = authorize(&state, &headers)?;
+    let _vault = authorize(&state, &headers, access)?;
     Ok(Json(serde_json::json!({"connected":true,"protocol":2})))
 }
 #[derive(Deserialize)]
@@ -791,9 +858,10 @@ struct Search {
 fn read_credentials(
     state: &Inner,
     headers: &HeaderMap,
+    access: BrowserAccess,
     search: Search,
 ) -> Result<Json<serde_json::Value>> {
-    let vault = authorize(state, headers)?;
+    let vault = authorize(state, headers, access)?;
     if search.hostname.len() > 253 || search.hostname.trim().is_empty() {
         return Err(Error::InvalidRequest);
     }
@@ -804,19 +872,21 @@ fn read_credentials(
 }
 async fn get_credentials(
     State(state): State<Arc<Inner>>,
+    Extension(access): Extension<BrowserAccess>,
     headers: HeaderMap,
     Query(search): Query<Search>,
 ) -> Result<Json<serde_json::Value>> {
-    read_credentials(&state, &headers, search)
+    read_credentials(&state, &headers, access, search)
 }
 async fn search_credentials(
     State(state): State<Arc<Inner>>,
+    Extension(access): Extension<BrowserAccess>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>> {
     require_json(&headers)?;
     let search = serde_json::from_slice(&body).map_err(|_| Error::InvalidRequest)?;
-    read_credentials(&state, &headers, search)
+    read_credentials(&state, &headers, access, search)
 }
 fn require_json(headers: &HeaderMap) -> Result<()> {
     let content = header(headers, "content-type")?;
@@ -827,10 +897,11 @@ fn require_json(headers: &HeaderMap) -> Result<()> {
 }
 async fn put_credentials(
     State(state): State<Arc<Inner>>,
+    Extension(access): Extension<BrowserAccess>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>> {
-    let mut vault = authorize(&state, &headers)?;
+    let mut vault = authorize(&state, &headers, access)?;
     require_json(&headers)?;
     let input: EntryInput = serde_json::from_slice(&body).map_err(|_| Error::InvalidRequest)?;
     let entry = vault.upsert(input)?;
@@ -842,6 +913,7 @@ async fn local_fallback() -> Error {
 async fn challenge(State(state): State<Arc<Inner>>) -> Result<Json<Challenge>> {
     state.ensure_active()?;
     let vault = lock(&state.vault)?;
+    state.ensure_active()?;
     let own = vault.status();
     Ok(Json(Challenge {
         protocol: 3,
@@ -862,6 +934,7 @@ struct AppVersionInfo {
 async fn app_version(State(state): State<Arc<Inner>>) -> Result<Json<AppVersionInfo>> {
     state.ensure_active()?;
     let own = lock(&state.vault)?.status();
+    state.ensure_active()?;
     Ok(Json(AppVersionInfo {
         protocol: 3,
         device_id: own.device_id,

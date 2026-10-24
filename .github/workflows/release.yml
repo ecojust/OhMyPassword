@@ -6,7 +6,7 @@ on:
       tag:
         description: Release manifest tag
         required: true
-        default: v0.2.4
+        default: v0.2.5
         type: string
 
 permissions:

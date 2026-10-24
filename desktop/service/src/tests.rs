@@ -1,5 +1,9 @@
 use super::*;
-use std::{io::Write, net::TcpStream, time::Instant};
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+    time::Instant,
+};
 const PASSWORD: &str = "test vault passphrase 123";
 pub(super) fn fixture(name: &str) -> (tempfile::TempDir, Arc<Mutex<Vault>>, Service) {
     fixture_interval(name, 300)
@@ -203,6 +207,303 @@ fn official_extension_needs_no_token_and_other_origins_remain_blocked() {
             .unwrap();
         assert_eq!(r.status(), 423);
     });
+}
+
+#[test]
+fn lan_pause_keeps_browser_access_but_full_pause_and_locked_vault_block_it() {
+    let (_ad, a, sa) = fixture("Browser bridge");
+    let (_bd, b, sb) = fixture("LAN peer");
+    a.lock()
+        .unwrap()
+        .upsert(entry("example.com", "saved-before-lock"))
+        .unwrap();
+    discover(&a, &sa, &b, &sb);
+    let merge_id = begin(&sa, &b, &sb);
+    let peer_id = b.lock().unwrap().status().device_id;
+    sa.pause_lan();
+    assert!(sa.browser_available());
+    assert!(!sa.status().running);
+    assert!(sa.status().merges.is_empty());
+    assert!(sa.status().discovered.is_empty());
+    assert!(matches!(sa.detect_devices(), Err(Error::Locked)));
+    assert!(matches!(sa.request_merge(&peer_id), Err(Error::Locked)));
+    assert!(sa.respond_merge(&merge_id, true).is_err());
+    sa.discovered_peer(
+        &peer_id,
+        format!("127.0.0.1:{}", sb.status().lan_port)
+            .parse()
+            .unwrap(),
+    );
+    assert!(sa.status().discovered.is_empty());
+
+    runtime().block_on(async {
+        let c = client();
+        let origin = include_str!("browser-origin.txt").trim();
+        let base = sa.status().local_endpoint;
+        let search = format!("{base}/v1/credentials/search");
+        let query = serde_json::json!({"hostname":"example.com"});
+        let status: serde_json::Value = c
+            .get(format!("{base}/v1/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["locked"], false);
+        let response = c
+            .post(format!("{base}/v1/browser/connect"))
+            .header("Origin", origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let response = c
+            .post(&search)
+            .header("Origin", origin)
+            .json(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let data: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(data["entries"][0]["password"], "saved-before-lock");
+        let response = c
+            .post(format!("{base}/v1/credentials"))
+            .header("Origin", origin)
+            .json(&entry("new.example", "saved-while-ui-locked"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        for other in [
+            None,
+            Some("https://evil.example"),
+            Some("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        ] {
+            let mut request = c.post(&search).json(&query);
+            if let Some(origin) = other {
+                request = request.header("Origin", origin);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), 403);
+            assert!(!response.text().await.unwrap().contains("saved-before-lock"));
+        }
+        let response = c
+            .post(&search)
+            .header("Origin", origin)
+            .header("Host", "evil.example")
+            .json(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        let response = c
+            .post(format!("{base}/v1/credentials"))
+            .header("Origin", origin)
+            .header("Content-Type", "application/json")
+            .body("x".repeat(MAX_BODY + 1))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 413);
+        let lan = format!("http://127.0.0.1:{}", sa.status().lan_port);
+        for route in ["/v3/info", "/v3/version"] {
+            assert_eq!(
+                c.get(format!("{lan}{route}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                423
+            );
+        }
+        assert_eq!(
+            c.post(format!("{lan}/v3/merge/request"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            423
+        );
+
+        sa.pause();
+        assert!(!sa.browser_available());
+        sa.pause_lan();
+        assert!(
+            !sa.browser_available(),
+            "LAN pause must not reactivate a fully paused bridge"
+        );
+        let status: serde_json::Value = c
+            .get(format!("{base}/v1/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["locked"], true);
+        for route in [
+            "/v1/browser/connect",
+            "/v1/credentials",
+            "/v1/credentials/search",
+        ] {
+            assert_eq!(
+                c.post(format!("{base}{route}"))
+                    .header("Origin", origin)
+                    .json(&query)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                423
+            );
+        }
+        sa.resume();
+        assert!(sa.browser_available());
+        assert_eq!(
+            c.post(&search)
+                .header("Origin", origin)
+                .json(&query)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            c.get(format!("{lan}/v3/info"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        a.lock().unwrap().lock();
+        assert!(!sa.browser_available());
+        assert_eq!(
+            c.post(&search)
+                .header("Origin", origin)
+                .json(&query)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            423
+        );
+        let status: serde_json::Value = c
+            .get(format!("{base}/v1/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["locked"], true);
+        a.lock().unwrap().unlock(PASSWORD).unwrap();
+        assert!(sa.browser_available());
+    });
+    assert_eq!(a.lock().unwrap().list(None).unwrap().len(), 2);
+    assert!(b.lock().unwrap().list(None).unwrap().is_empty());
+    sa.inner.shutdown.send_replace(true);
+    assert!(!sa.browser_available());
+    sa.resume();
+    assert!(
+        !sa.browser_available(),
+        "resume must not revive a stopped service"
+    );
+}
+
+#[test]
+fn full_pause_invalidates_http_waiting_for_vault_even_after_resume() {
+    let (dir, vault, service) = fixture("HTTP lifecycle");
+    vault
+        .lock()
+        .unwrap()
+        .upsert(entry("example.com", "keep-secret"))
+        .unwrap();
+    for route in ["/v1/credentials/search", "/v1/credentials"] {
+        let before = std::fs::read(dir.path().join("vault.json")).unwrap();
+        let guard = vault.lock().unwrap();
+        let url = format!("{}{route}", service.status().local_endpoint);
+        let pending = thread::spawn(move || {
+            runtime().block_on(async {
+                let body = if route.ends_with("search") {
+                    serde_json::json!({"hostname":"example.com"})
+                } else {
+                    serde_json::to_value(entry("never.example", "must-not-save")).unwrap()
+                };
+                let response = client()
+                    .post(url)
+                    .header("Origin", include_str!("browser-origin.txt").trim())
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                (response.status(), response.text().await.unwrap())
+            })
+        });
+        // Observe the actual HTTP middleware blocked on the vault, without timing
+        // guesses or a real network scan.
+        eventually(|| service.inner.browser_waiters.load(Ordering::Acquire) > 0);
+        service.pause();
+        service.resume();
+        drop(guard);
+        let (status, body) = pending.join().unwrap();
+        assert_eq!(status, 423);
+        assert!(!body.contains("keep-secret"));
+        assert_eq!(
+            std::fs::read(dir.path().join("vault.json")).unwrap(),
+            before
+        );
+    }
+    assert!(service.browser_available());
+}
+
+#[test]
+fn full_pause_invalidates_http_waiting_for_body_while_lan_pause_preserves_it() {
+    let (dir, vault, service) = fixture("Slow browser request");
+    for full_pause in [false, true] {
+        service.resume();
+        let before = std::fs::read(dir.path().join("vault.json")).unwrap();
+        let body = serde_json::to_string(&entry(
+            if full_pause {
+                "blocked.example"
+            } else {
+                "allowed.example"
+            },
+            "browser-save",
+        ))
+        .unwrap();
+        let mut socket =
+            TcpStream::connect((Ipv4Addr::LOCALHOST, service.inner.local_port)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        socket.write_all(format!("POST /v1/credentials HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", service.inner.local_port, include_str!("browser-origin.txt").trim(), body.len()).as_bytes()).unwrap();
+        eventually(|| service.inner.capacity.available_permits() < 8);
+        if full_pause {
+            service.pause();
+            service.resume();
+        } else {
+            service.pause_lan();
+        }
+        socket.write_all(body.as_bytes()).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        if full_pause {
+            assert!(response.starts_with("HTTP/1.1 423"), "{response}");
+            assert_eq!(
+                std::fs::read(dir.path().join("vault.json")).unwrap(),
+                before
+            );
+        } else {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        }
+    }
+    assert_eq!(vault.lock().unwrap().list(None).unwrap().len(), 1);
 }
 
 #[test]

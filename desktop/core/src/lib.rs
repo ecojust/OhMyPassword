@@ -396,6 +396,23 @@ impl Vault {
         Ok(self.status())
     }
 
+    /// Re-authenticate an already unlocked in-memory vault without reloading
+    /// its file or changing availability. The browser may have saved newer
+    /// entries while the application's interface was locked. In particular,
+    /// a wrong interface-unlock password must not clear that live session.
+    pub fn verify_password(&self, master_password: &str) -> Result<()> {
+        if master_password.len() > 1024 {
+            return Err(error("主密码过长"));
+        }
+        let current = self.current()?;
+        let candidate = derive_key(master_password, &current.salt)?;
+        if bool::from(current.key.as_ref().ct_eq(candidate.as_ref())) {
+            Ok(())
+        } else {
+            Err(error("主密码错误"))
+        }
+    }
+
     pub fn lock(&mut self) -> Status {
         self.merge_write = None;
         self.unlocked = None;

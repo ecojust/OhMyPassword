@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "ohmypassword-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "ohmypassword-desktop"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "local-ip-address",
  "ohmypassword-core",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "ohmypassword-service"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -4003,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-discovery"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",

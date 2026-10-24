@@ -4,48 +4,21 @@ use ohmypassword_core::{Entry, EntryInput, EntrySummary, Status, Vault, Version}
 use ohmypassword_service::{MergeSession, Service, ServiceConfig, ServiceStatus};
 use serde::Serialize;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 use zeroize::Zeroizing;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-type NativeResult<T> = std::result::Result<T, String>;
-struct AppState {
-    vault: Arc<Mutex<Vault>>,
-    service: Option<Arc<Service>>,
-    service_error: Option<String>,
-    activity: Mutex<Instant>,
-    generation: AtomicU64,
-    stopping: AtomicBool,
-}
-impl AppState {
-    fn touch(&self) {
-        if let Ok(mut time) = self.activity.lock() {
-            *time = Instant::now();
-        }
-    }
-    fn lock(&self) -> NativeResult<Status> {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(service) = &self.service {
-            service.pause();
-        }
-        self.vault
-            .lock()
-            .map(|mut vault| vault.lock())
-            .map_err(|_| "密码库暂不可用".into())
-    }
-    fn unlocked(&self) {
-        self.touch();
-        if let Some(service) = &self.service {
-            service.resume();
-        }
-    }
-}
+mod session;
+use session::{AppState, NativeResult};
 #[derive(Serialize)]
 struct AppStatus {
     app_version: &'static str,
+    session_generation: u64,
+    interface_locked: bool,
+    browser_available: bool,
     vault: Status,
     service: Option<ServiceStatus>,
     service_error: Option<String>,
@@ -69,82 +42,112 @@ fn local_addresses() -> Vec<String> {
 }
 #[tauri::command]
 fn app_status(state: State<'_, Arc<AppState>>) -> NativeResult<AppStatus> {
-    let vault = state.vault.lock().map_err(|_| "密码库暂不可用")?.status();
+    let snapshot = state.snapshot()?;
     Ok(AppStatus {
         app_version: env!("CARGO_PKG_VERSION"),
-        vault,
-        service: state.service.as_ref().map(|service| service.status()),
+        session_generation: snapshot.session_generation,
+        interface_locked: snapshot.interface_locked,
+        browser_available: snapshot.browser_available,
+        vault: snapshot.vault,
+        service: snapshot.service,
         service_error: state.service_error.clone(),
-        local_addresses: local_addresses(),
+        local_addresses: if snapshot.interface_locked {
+            vec![]
+        } else {
+            local_addresses()
+        },
         mobile: cfg!(any(target_os = "android", target_os = "ios")),
     })
 }
 async fn with_vault<T: Send + 'static>(
     state: Arc<AppState>,
+    expected_generation: u64,
     operation: impl FnOnce(&mut Vault) -> ohmypassword_core::Result<T> + Send + 'static,
 ) -> NativeResult<T> {
-    let generation = state.generation.load(Ordering::SeqCst);
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut vault = state
-            .vault
-            .lock()
-            .map_err(|_| "密码库暂不可用".to_owned())?;
-        if state.generation.load(Ordering::SeqCst) != generation {
-            return Err("密码库会话已结束，请重新解锁".into());
-        }
-        let value = operation(&mut vault).map_err(|error| error.to_string())?;
-        if state.generation.load(Ordering::SeqCst) != generation {
-            vault.lock();
-            return Err("密码库会话已结束，请重新解锁".into());
-        }
-        Ok(value)
-    })
-    .await
-    .map_err(|_| "密码库操作未完成".to_owned())?
+    let generation = state.interface_ticket(expected_generation)?;
+    tauri::async_runtime::spawn_blocking(move || state.ui_operation(generation, operation))
+        .await
+        .map_err(|_| "密码库操作未完成".to_owned())?
 }
+
 #[tauri::command]
 async fn create_vault(
+    expected_generation: u64,
     password: String,
     device_name: String,
     state: State<'_, Arc<AppState>>,
 ) -> NativeResult<Status> {
     let password = Zeroizing::new(password);
-    let result = with_vault(state.inner().clone(), move |vault| {
-        vault.create(&password, &device_name)
+    let generation = state.authentication_ticket(expected_generation)?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.authenticate(generation, &password, Some(&device_name))
     })
-    .await?;
-    state.unlocked();
-    Ok(result)
+    .await
+    .map_err(|_| "密码库操作未完成".to_owned())?
 }
 #[tauri::command]
-async fn unlock_vault(password: String, state: State<'_, Arc<AppState>>) -> NativeResult<Status> {
+async fn unlock_vault(
+    expected_generation: u64,
+    password: String,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Status> {
     let password = Zeroizing::new(password);
-    let result = with_vault(state.inner().clone(), move |vault| vault.unlock(&password)).await?;
-    state.unlocked();
-    Ok(result)
+    let generation = state.authentication_ticket(expected_generation)?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.authenticate(generation, &password, None))
+        .await
+        .map_err(|_| "密码库操作未完成".to_owned())?
 }
 #[tauri::command]
 fn lock_vault(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> NativeResult<Status> {
-    let result = state.lock()?;
+    let result = state.lock_interface()?;
     let _ = app.emit("vault-locked", ());
     Ok(result)
 }
+#[tauri::command]
+fn fully_lock_vault(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> NativeResult<Status> {
+    let result = state.fully_lock()?;
+    let _ = app.emit("vault-locked", ());
+    Ok(result)
+}
+
 #[tauri::command]
 fn user_activity(state: State<'_, Arc<AppState>>) {
     state.touch();
 }
 #[tauri::command]
-async fn list_entries(state: State<'_, Arc<AppState>>) -> NativeResult<Vec<EntrySummary>> {
-    with_vault(state.inner().clone(), |vault| vault.list(None)).await
+async fn list_entries(
+    expected_generation: u64,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Vec<EntrySummary>> {
+    with_vault(state.inner().clone(), expected_generation, |vault| {
+        vault.list(None)
+    })
+    .await
 }
 #[tauri::command]
-async fn get_entry(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<Entry> {
+async fn get_entry(
+    expected_generation: u64,
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Entry> {
     state.touch();
-    with_vault(state.inner().clone(), move |vault| vault.get(&id)).await
+    with_vault(state.inner().clone(), expected_generation, move |vault| {
+        vault.get(&id)
+    })
+    .await
 }
 #[tauri::command]
-async fn save_entry(input: EntryInput, state: State<'_, Arc<AppState>>) -> NativeResult<()> {
-    with_vault(state.inner().clone(), move |vault| {
+async fn save_entry(
+    expected_generation: u64,
+    input: EntryInput,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<()> {
+    with_vault(state.inner().clone(), expected_generation, move |vault| {
         vault.upsert(input).map(|_| ())
     })
     .await?;
@@ -152,36 +155,61 @@ async fn save_entry(input: EntryInput, state: State<'_, Arc<AppState>>) -> Nativ
     Ok(())
 }
 #[tauri::command]
-async fn delete_entry(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<()> {
-    with_vault(state.inner().clone(), move |vault| vault.delete(&id)).await?;
+async fn delete_entry(
+    expected_generation: u64,
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<()> {
+    with_vault(state.inner().clone(), expected_generation, move |vault| {
+        vault.delete(&id)
+    })
+    .await?;
     state.touch();
     Ok(())
 }
 #[tauri::command]
-async fn entry_history(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<Vec<Entry>> {
+async fn entry_history(
+    expected_generation: u64,
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Vec<Entry>> {
     state.touch();
-    with_vault(state.inner().clone(), move |vault| vault.get_conflicts(&id)).await
+    with_vault(state.inner().clone(), expected_generation, move |vault| {
+        vault.get_conflicts(&id)
+    })
+    .await
 }
 #[tauri::command]
-async fn list_recovery_entries(state: State<'_, Arc<AppState>>) -> NativeResult<Vec<EntrySummary>> {
+async fn list_recovery_entries(
+    expected_generation: u64,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Vec<EntrySummary>> {
     state.touch();
-    with_vault(state.inner().clone(), |vault| vault.list_recovery_entries()).await
+    with_vault(state.inner().clone(), expected_generation, |vault| {
+        vault.list_recovery_entries()
+    })
+    .await
 }
 #[tauri::command]
-async fn recovery_history(id: String, state: State<'_, Arc<AppState>>) -> NativeResult<Vec<Entry>> {
+async fn recovery_history(
+    expected_generation: u64,
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<Vec<Entry>> {
     state.touch();
-    with_vault(state.inner().clone(), move |vault| {
+    with_vault(state.inner().clone(), expected_generation, move |vault| {
         vault.recovery_history(&id)
     })
     .await
 }
 #[tauri::command]
 async fn restore_entry(
+    expected_generation: u64,
     id: String,
     version: Version,
     state: State<'_, Arc<AppState>>,
 ) -> NativeResult<Entry> {
-    let restored = with_vault(state.inner().clone(), move |vault| {
+    let restored = with_vault(state.inner().clone(), expected_generation, move |vault| {
         vault.restore_entry(&id, version)
     })
     .await?;
@@ -189,38 +217,32 @@ async fn restore_entry(
     Ok(restored)
 }
 #[tauri::command]
-fn detect_devices(state: State<'_, Arc<AppState>>) -> NativeResult<()> {
+fn detect_devices(expected_generation: u64, state: State<'_, Arc<AppState>>) -> NativeResult<()> {
     state.touch();
-    state
-        .service
-        .as_ref()
-        .ok_or("局域网服务未启动")?
-        .detect_devices()
-        .map_err(|error| error.to_string())
+    state.with_service(expected_generation, |service| service.detect_devices())
 }
 #[tauri::command]
-fn request_merge(device_id: String, state: State<'_, Arc<AppState>>) -> NativeResult<MergeSession> {
+fn request_merge(
+    expected_generation: u64,
+    device_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> NativeResult<MergeSession> {
     state.touch();
-    state
-        .service
-        .as_ref()
-        .ok_or("局域网服务未启动")?
-        .request_merge(&device_id)
-        .map_err(|error| error.to_string())
+    state.with_service(expected_generation, |service| {
+        service.request_merge(&device_id)
+    })
 }
 #[tauri::command]
 fn respond_merge(
+    expected_generation: u64,
     session_id: String,
     accept: bool,
     state: State<'_, Arc<AppState>>,
 ) -> NativeResult<()> {
     state.touch();
-    state
-        .service
-        .as_ref()
-        .ok_or("局域网服务未启动")?
-        .respond_merge(&session_id, accept)
-        .map_err(|error| error.to_string())
+    state.with_service(expected_generation, |service| {
+        service.respond_merge(&session_id, accept)
+    })
 }
 
 /// Both native wrappers supply their own generated Tauri context.
@@ -243,14 +265,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
                 }
                 Err(error) => (None, Some(error.to_string())),
             };
-            let state = Arc::new(AppState {
-                vault,
-                service,
-                service_error,
-                activity: Mutex::new(Instant::now()),
-                generation: AtomicU64::new(0),
-                stopping: AtomicBool::new(false),
-            });
+            let state = Arc::new(AppState::new(vault, service, service_error));
             app.manage(state.clone());
             let handle = app.handle().clone();
             std::thread::spawn(move || monitor(handle, state));
@@ -261,6 +276,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             create_vault,
             unlock_vault,
             lock_vault,
+            fully_lock_vault,
             user_activity,
             list_entries,
             get_entry,
@@ -279,8 +295,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
     app.run(|app, event| match event {
         tauri::RunEvent::Exit => {
             if let Some(state) = app.try_state::<Arc<AppState>>() {
-                state.stopping.store(true, Ordering::SeqCst);
-                let _ = state.lock();
+                let _ = state.stop();
             }
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -289,8 +304,28 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             ..
         } => {
             if let Some(state) = app.try_state::<Arc<AppState>>() {
-                let _ = state.lock();
+                let _ = state.suspend();
                 let _ = app.emit("vault-locked", ());
+            }
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::Resumed,
+            ..
+        } => {
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                state.resume_foreground();
+            }
+        }
+        // iOS can become active after a temporary interruption without entering
+        // the background. Focus only permits re-authentication; it never unlocks.
+        #[cfg(target_os = "ios")]
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::Focused(true),
+            ..
+        } => {
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                state.resume_foreground();
             }
         }
         _ => {}
@@ -312,12 +347,13 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
             .lock()
             .map(|time| time.elapsed() >= IDLE_TIMEOUT)
             .unwrap_or(true);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         let status = match state.vault.lock() {
             Ok(vault) => vault.status(),
             Err(_) => continue,
         };
-        if idle && !status.locked {
-            let _ = state.lock();
+        if idle && !state.interface_locked() {
+            let _ = state.lock_interface();
             let _ = app.emit("vault-locked", ());
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -331,7 +367,7 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
                 scan_generation = None;
                 seen.clear();
             }
-            let locked = idle || status.locked;
+            let locked = idle || state.interface_locked() || status.locked;
             if locked && discovery_started {
                 let _ = app.discovery().stop();
                 discovery_started = false;
@@ -340,6 +376,12 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
             }
             if !locked {
                 if let Some(service) = &state.service {
+                    // Mobile plugin calls synchronously wait for platform UI
+                    // callbacks. Never hold lifecycle/vault locks across them:
+                    // a main-thread Suspended event must be able to fully lock.
+                    if state.interface_ticket(generation).is_err() {
+                        continue;
+                    }
                     if !discovery_started {
                         discovery_started = app
                             .discovery()
@@ -349,34 +391,101 @@ fn monitor(app: tauri::AppHandle, state: Arc<AppState>) {
                                 port: service.status().lan_port,
                             })
                             .is_ok();
+                        if state.interface_ticket(generation).is_err() {
+                            stop_native_discovery(
+                                &app,
+                                &mut discovery_started,
+                                &mut scan_generation,
+                                &mut seen,
+                            );
+                            continue;
+                        }
                     }
                     if discovery_started {
                         let discovery_status = service.status();
                         if discovery_status.discovering
                             && scan_generation != Some(discovery_status.discovery_generation)
-                            && app.discovery().scan().is_ok()
+                            && state.interface_ticket(generation).is_ok()
                         {
-                            scan_generation = Some(discovery_status.discovery_generation);
+                            let scanned = app.discovery().scan().is_ok();
+                            if state.interface_ticket(generation).is_err() {
+                                stop_native_discovery(
+                                    &app,
+                                    &mut discovery_started,
+                                    &mut scan_generation,
+                                    &mut seen,
+                                );
+                                continue;
+                            }
+                            if scanned {
+                                scan_generation = Some(discovery_status.discovery_generation);
+                            }
                         }
-                        if let Ok(result) = app.discovery().peers() {
-                            let mut present = std::collections::HashSet::new();
-                            for peer in result.peers {
-                                present.insert(peer.id.clone());
-                                let observation = (peer.endpoint.clone(), peer.last_seen);
-                                // Polling a cached resolution must not keep an offline
-                                // device alive forever in the service discovery cache.
-                                if seen.get(&peer.id) != Some(&observation) {
-                                    if let Ok(endpoint) = peer.endpoint.parse() {
-                                        service.discovered_peer(&peer.id, endpoint);
-                                        seen.insert(peer.id, observation);
+                        if state.interface_ticket(generation).is_err() {
+                            stop_native_discovery(
+                                &app,
+                                &mut discovery_started,
+                                &mut scan_generation,
+                                &mut seen,
+                            );
+                            continue;
+                        }
+                        let peers = app.discovery().peers();
+                        if state.interface_ticket(generation).is_err() {
+                            stop_native_discovery(
+                                &app,
+                                &mut discovery_started,
+                                &mut scan_generation,
+                                &mut seen,
+                            );
+                            continue;
+                        }
+                        if let Ok(result) = peers {
+                            // Only the pure-Rust publication is serialized with
+                            // locking, preventing stale callbacks from entering
+                            // a newly unlocked session. No platform call occurs
+                            // while this gate is held.
+                            let published = state.with_service(generation, |service| {
+                                let mut present = std::collections::HashSet::new();
+                                for peer in result.peers {
+                                    present.insert(peer.id.clone());
+                                    let observation = (peer.endpoint.clone(), peer.last_seen);
+                                    if seen.get(&peer.id) != Some(&observation) {
+                                        if let Ok(endpoint) = peer.endpoint.parse() {
+                                            service.discovered_peer(&peer.id, endpoint);
+                                            seen.insert(peer.id, observation);
+                                        }
                                     }
                                 }
+                                seen.retain(|id, _| present.contains(id));
+                                Ok(())
+                            });
+                            if published.is_err() {
+                                stop_native_discovery(
+                                    &app,
+                                    &mut discovery_started,
+                                    &mut scan_generation,
+                                    &mut seen,
+                                );
                             }
-                            seen.retain(|id, _| present.contains(id));
                         }
                     }
                 }
             }
         }
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn stop_native_discovery(
+    app: &tauri::AppHandle,
+    started: &mut bool,
+    scan_generation: &mut Option<u64>,
+    seen: &mut std::collections::HashMap<String, (String, u64)>,
+) {
+    use tauri_plugin_discovery::DiscoveryExt;
+    let _ = app.discovery().stop();
+    *started = false;
+    *scan_generation = None;
+    seen.clear();
 }

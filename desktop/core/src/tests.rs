@@ -34,6 +34,40 @@ fn revised(entry: &Entry, password: &str) -> EntryInput {
 }
 
 #[test]
+fn password_reverification_preserves_live_records_key_and_ciphertext() {
+    let (dir, mut vault) = ready();
+    let original = vault
+        .upsert(input("verify.example", "first-value"))
+        .unwrap();
+    let updated = vault
+        .upsert(revised(&original, "browser-saved-new-value"))
+        .unwrap();
+    let before = fs::read(dir.path().join("vault.json")).unwrap();
+    let history = vault.export_sync().unwrap().records;
+
+    assert!(vault.verify_password("wrong interface password").is_err());
+    assert!(vault.verify_password(&"x".repeat(1025)).is_err());
+    assert!(!vault.status().locked);
+    assert_eq!(
+        vault.get(&updated.id).unwrap().password,
+        "browser-saved-new-value"
+    );
+    vault.verify_password(PASSWORD).unwrap();
+    assert!(vault.export_sync().unwrap().records == history);
+    assert_eq!(fs::read(dir.path().join("vault.json")).unwrap(), before);
+
+    // This method cannot turn a complete lock into an interface-only lock.
+    vault.lock();
+    assert!(vault.verify_password(PASSWORD).is_err());
+    assert!(vault.status().locked);
+    vault.unlock(PASSWORD).unwrap();
+    assert_eq!(
+        vault.get(&updated.id).unwrap().password,
+        "browser-saved-new-value"
+    );
+}
+
+#[test]
 fn encrypted_roundtrip_random_nonce_and_private_permissions() {
     let (dir, mut vault) = ready();
     let entry = vault

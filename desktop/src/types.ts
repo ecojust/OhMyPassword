@@ -6,7 +6,7 @@ export interface MergeSession { id:string; peer_id:string; peer_name:string; end
 export type ScanState = 'idle'|'planning'|'scanning'|'completed'|'cancelled'|'failed'|'disabled';
 export interface IncompatiblePeer extends DiscoveredPeer { protocol:number }
 export interface ServiceStatus { local_endpoint:string; lan_port:number; running:boolean; last_error:string|null; discovery_generation:number; last_discovery_at:number|null; next_discovery_at:number|null; discovering:boolean; discovery_duration_secs:number; discovery_remaining_secs:number; scan_state:ScanState; scan_checked:number; scan_total:number; scan_ranges:string[]; scan_limited:boolean; scan_error:string|null; scan_port:number; incompatible_discovered:IncompatiblePeer[]; discovered:DiscoveredPeer[]; merges:MergeSession[] }
-export interface AppStatus { app_version:string; vault:VaultStatus; service:ServiceStatus|null; service_error:string|null; local_addresses:string[]; mobile:boolean }
+export interface AppStatus { app_version:string; session_generation:number; interface_locked?:boolean; browser_available?:boolean; vault:VaultStatus; service:ServiceStatus|null; service_error:string|null; local_addresses:string[]; mobile:boolean }
 export interface EntrySummary { id:string; hostname:string; title:string; username:string; version:Version; deleted:boolean; conflict_count:number }
 export interface Entry { id:string; hostname:string; title:string; username:string; password:string; notes:string; version:Version; deleted:boolean }
 export interface EntryInput { id:string|null; hostname:string; title:string; username:string; password:string; notes:string }

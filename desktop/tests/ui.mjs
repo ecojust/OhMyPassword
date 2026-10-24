@@ -15,23 +15,34 @@ const fixtureEntry = {id:'record-1',hostname:'example.com',title:'Example',usern
 async function mock(page, options={}) {
  await page.addInitScript(({entry,options})=>{
   const state={initialized:options.initialized!==false,locked:options.locked??false,mobile:options.mobile??false,entries:options.empty?[]:[entry],recovery:options.recovery??[{...entry,password:'previous-fixture-secret'}],restoreError:false,entryCountOverride:null,discovered:options.discovered??[],merges:options.merges??[],discovering:false,discoveryDuration:options.discoveryDuration??20,discoveryRemainingOverride:null,lastDiscovery:null,nextDiscovery:Date.now()/1000+300,discoveryGeneration:0,scanState:options.scanState??'idle',scanChecked:options.scanChecked??0,scanTotal:options.scanTotal??0,scanRanges:options.scanRanges??[],scanLimited:options.scanLimited??false,scanError:options.scanError??null,incompatibleDiscovered:options.incompatibleDiscovered??[],localAddresses:options.localAddresses??['192.168.1.10'],listError:false,calls:[],delays:{},pending:{},copied:[],events:{}};
+  state.interfaceLocked=options.interfaceLocked??state.locked;
+  state.sessionGeneration=options.sessionGeneration??0;
+  state.delaysBefore={};state.pendingBefore={};state.rejected=[];
   window.__fixture=state; window.isTauri=true;
   let next=1; const callbacks=new Map();
-  window.__lock=()=>{state.locked=true;state.merges=[];state.discovering=false;state.lastDiscovery=null;state.scanState='cancelled';callbacks.get(state.events['vault-locked'])?.({event:'vault-locked',id:1,payload:null});};
-  window.__release=name=>state.pending[name]?.();
+  const lockInterface=full=>{state.sessionGeneration++;state.interfaceLocked=true;if(full)state.locked=true;state.merges=[];state.discovered=[];state.incompatibleDiscovered=[];state.discovering=false;state.lastDiscovery=null;state.scanState='cancelled';callbacks.get(state.events['vault-locked'])?.({event:'vault-locked',id:1,payload:null});};
+  window.__lock=()=>lockInterface(true);
+  window.__softLock=()=>lockInterface(false);
+  window.__release=name=>{const pending=state.pending[name]??[];delete state.pending[name];pending.forEach(resolve=>resolve());};
+  window.__releaseBefore=name=>{const pending=state.pendingBefore[name]??[];delete state.pendingBefore[name];pending.forEach(resolve=>resolve());};
   window.__TAURI_INTERNALS__={
    transformCallback(fn){const id=next++;callbacks.set(id,fn);return id;},unregisterCallback(id){callbacks.delete(id);},
    async invoke(name,args={}){
-    state.calls.push({name,...(name==='save_entry'?{id:args.input.id,hostname:args.input.hostname}:['request_merge','respond_merge','restore_entry'].includes(name)?args:{} )});
+    args=structuredClone(args);
+    state.calls.push({name,...(args.expectedGeneration===undefined?{}:{expectedGeneration:args.expectedGeneration}),...(name==='save_entry'?{id:args.input.id,hostname:args.input.hostname}:['request_merge','respond_merge','restore_entry'].includes(name)?args:{} )});
     let result;
     if(name==='plugin:event|listen'){state.events[args.event]=args.handler;return next++;}
     if(name==='plugin:event|unlisten')return;
     if(name==='plugin:clipboard-manager|write_text'){state.copied.push(args.text);return;}
-    if(name==='app_status')result={app_version:options.appVersion??'0.2.4',vault:{initialized:state.initialized,locked:state.locked,device_id:'device-1',device_name:'测试电脑',entry_count:state.entryCountOverride??state.entries.length,peer_count:0},service:options.serviceError?null:{local_endpoint:'http://127.0.0.1:17841',lan_port:17842,running:true,last_error:null,discovery_generation:state.discoveryGeneration,last_discovery_at:state.lastDiscovery,next_discovery_at:state.nextDiscovery,discovering:state.discovering,discovery_duration_secs:state.discoveryDuration,discovery_remaining_secs:state.discovering?(state.discoveryRemainingOverride??Math.max(0,state.discoveryDuration-Math.floor(Date.now()/1000-state.lastDiscovery))):0,scan_state:state.scanState,scan_checked:state.scanChecked,scan_total:state.scanTotal,scan_ranges:state.scanRanges,scan_limited:state.scanLimited,scan_error:state.scanError,scan_port:17842,incompatible_discovered:state.incompatibleDiscovered,discovered:state.discovered,merges:state.merges},service_error:options.serviceError?'端口被其他程序占用':null,local_addresses:state.localAddresses,mobile:state.mobile};
-    else if(name==='create_vault'||name==='unlock_vault'){if(args.password==='wrong-password')throw '主密码错误';state.initialized=true;state.locked=false;result=null;}
-    else if(name==='lock_vault'){window.__lock();result=null;}
+    // Suspend before entering the backend, separately from delaying a completed reply.
+    if(state.delaysBefore[name])await new Promise(resolve=>(state.pendingBefore[name]??=[]).push(resolve));
+    if(!['app_status','lock_vault','fully_lock_vault','user_activity'].includes(name)&&args.expectedGeneration!==state.sessionGeneration){state.rejected.push({name,expectedGeneration:args.expectedGeneration,actualGeneration:state.sessionGeneration});throw '密码库会话已结束，请重新解锁。';}
+    if(name==='app_status')result={app_version:options.appVersion??'0.2.5',session_generation:state.sessionGeneration,interface_locked:state.interfaceLocked,browser_available:!state.locked&&!options.serviceError,vault:{initialized:state.initialized,locked:state.locked,device_id:'device-1',device_name:'测试电脑',entry_count:state.entryCountOverride??state.entries.length,peer_count:0},service:options.serviceError?null:{local_endpoint:'http://127.0.0.1:17841',lan_port:17842,running:true,last_error:null,discovery_generation:state.discoveryGeneration,last_discovery_at:state.lastDiscovery,next_discovery_at:state.nextDiscovery,discovering:state.discovering,discovery_duration_secs:state.discoveryDuration,discovery_remaining_secs:state.discovering?(state.discoveryRemainingOverride??Math.max(0,state.discoveryDuration-Math.floor(Date.now()/1000-state.lastDiscovery))):0,scan_state:state.scanState,scan_checked:state.scanChecked,scan_total:state.scanTotal,scan_ranges:state.scanRanges,scan_limited:state.scanLimited,scan_error:state.scanError,scan_port:17842,incompatible_discovered:state.incompatibleDiscovered,discovered:state.discovered,merges:state.merges},service_error:options.serviceError?'端口被其他程序占用':null,local_addresses:state.localAddresses,mobile:state.mobile};
+    else if(name==='create_vault'||name==='unlock_vault'){if(args.password==='wrong-password')throw '主密码错误';state.initialized=true;state.locked=false;state.interfaceLocked=false;result=null;}
+    else if(name==='lock_vault'){window.__softLock();result=null;}
+    else if(name==='fully_lock_vault'){window.__lock();result=null;}
     else if(name==='user_activity')return;
-    else if(state.locked)throw '密码库已锁定';
+    else if(state.interfaceLocked||state.locked)throw '密码库界面已锁定';
     else if(name==='list_entries'){if(state.listError)throw '密码列表刷新失败';result=state.entries.map(({password,notes,...item})=>({...item,conflict_count:0}));}
     else if(name==='get_entry')result=state.entries.find(item=>item.id===args.id);
     else if(name==='entry_history'||name==='recovery_history')result=state.recovery.filter(item=>item.id===args.id&&!item.deleted);
@@ -50,7 +61,7 @@ async function mock(page, options={}) {
     }
     else throw new Error(`Unmocked command ${name}`);
     result=structuredClone(result);
-    if(state.delays[name])await new Promise(resolve=>state.pending[name]=resolve);
+    if(state.delays[name])await new Promise(resolve=>(state.pending[name]??=[]).push(resolve));
     return result;
    }
   };
@@ -68,7 +79,7 @@ async function check(name,action,options={}){
  try{
   await page.clock.install();
   if(!options.preview)await mock(page,options);
-  await page.goto(url);await page.locator(options.preview?'.gate':options.locked||options.initialized===false?'#gate-form':'.shell').waitFor();
+  await page.goto(url);await page.locator(options.preview?'.gate':options.interfaceLocked||options.locked||options.initialized===false?'#gate-form':'.shell').waitFor();
   await action(page);assert.deepEqual(errors,[],'No unhandled JavaScript errors');
   console.log(`PASS ${++passed}: ${name}`);
  }catch(error){await shot(page,`failed-${passed+1}`);throw new Error(`${name}: ${error.message}`,{cause:error});}
@@ -93,9 +104,62 @@ try{
   assert.equal(await page.locator('#master-password').count(),0);assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
  },{initialized:false,locked:true});
  await check('wrong password stays locked and can retry',async page=>{
+  assert.match(await page.locator('#lock-status').innerText(),/密码库已锁定.*插件暂不可用/);
   await page.locator('#master-password').fill('wrong-password');await page.locator('#gate-form button').click();await page.getByText('主密码错误',{exact:true}).waitFor();
-  assert.equal(await page.locator('#master-password').inputValue(),'');assert.equal(await page.locator('.shell').count(),0);await unlock(page);
+  assert.equal(await page.locator('#master-password').inputValue(),'');assert.equal(await page.locator('.shell').count(),0);assert.equal(await page.evaluate(()=>window.__fixture.locked),true);assert.match(await page.locator('#lock-status').innerText(),/插件暂不可用/);await unlock(page);
  },{locked:true});
+ await check('interface lock hides accounts while the browser stays available and full lock disables it',async page=>{
+  await page.getByRole('switch',{name:'账号明文显示'}).check();await page.locator('#search').fill(fixtureEntry.username);await page.locator('#lock').click();
+  await page.locator('#lock-status').filter({hasText:'插件仍可使用'}).waitFor();await ready(page);
+  assert.equal(await page.locator('.shell,dialog,[data-entry],#search').count(),0);assert.equal((await page.content()).includes(fixtureEntry.username),false);assert.equal((await page.content()).includes(fixtureEntry.password),false);
+  assert.deepEqual(await page.evaluate(()=>({vault:window.__fixture.locked,interface:window.__fixture.interfaceLocked})),{vault:false,interface:true});
+  const listCalls=await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='list_entries').length);await tick(page);assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='list_entries').length),listCalls,'A soft-locked interface must not query or display vault records.');await shot(page,'desktop-interface-locked');
+  await page.locator('#master-password').fill('wrong-password');await page.locator('#gate-form button').click();await page.getByText('主密码错误',{exact:true}).waitFor();
+  assert.equal(await page.locator('#master-password').inputValue(),'');assert.match(await page.locator('#lock-status').innerText(),/插件仍可使用/);assert.equal(await page.evaluate(()=>window.__fixture.locked),false);
+  await page.evaluate(()=>window.__fixture.delays.fully_lock_vault=true);await page.locator('#fully-lock').click();await page.waitForFunction(()=>!!window.__fixture.pending.fully_lock_vault);
+  await page.evaluate(()=>window.__lock());assert.equal(await page.locator('#gate-form button').isDisabled(),true,'A second native lock event must not enable unlock while the full-lock command is pending.');assert.equal(await page.locator('#fully-lock').isDisabled(),false);
+  await page.evaluate(()=>{window.__fixture.delays.fully_lock_vault=false;window.__release('fully_lock_vault');});await page.locator('#lock-status').filter({hasText:'插件暂不可用'}).waitFor();await ready(page);assert.equal(await page.evaluate(()=>window.__fixture.locked),true);assert.match(await page.locator('.gate').innerText(),/解锁/);await shot(page,'desktop-fully-locked');
+  await unlock(page);assert.equal(await page.getByRole('switch',{name:'账号明文显示'}).isChecked(),false);assert.equal(await page.locator('#search').inputValue(),'');
+  await page.locator('[data-tab=browser]').click();await page.locator('#fully-lock').click();await page.locator('#lock-status').filter({hasText:'插件暂不可用'}).waitFor();
+  assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='lock_vault').length),1);assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='fully_lock_vault').length),2);
+ });
+ await check('idle interface-lock event removes revealed secrets before status refresh finishes',async page=>{
+  await page.getByRole('switch',{name:'账号明文显示'}).check();await page.locator('[data-entry]').click();await page.locator('#entry-password').waitFor();await click(page,'reveal');
+  assert.equal(await page.locator('#entry-password').inputValue(),fixtureEntry.password);
+  const afterEvent=await page.evaluate(()=>{window.__fixture.delays.app_status=true;window.__softLock();return {dialog:!!document.querySelector('dialog'),entry:!!document.querySelector('#entry-password'),account:document.body.textContent.includes('test-user')};});
+  assert.deepEqual(afterEvent,{dialog:false,entry:false,account:false});await page.waitForFunction(()=>!!window.__fixture.pending.app_status);
+  await page.evaluate(()=>{window.__fixture.delays.app_status=false;window.__release('app_status');});await page.locator('#lock-status').filter({hasText:'插件仍可使用'}).waitFor();
+  assert.equal(await page.evaluate(()=>window.__fixture.locked),false);assert.equal((await page.content()).includes(fixtureEntry.password),false);await unlock(page);assert.equal(await page.locator('dialog').count(),0);
+ });
+ await check('late password reply cannot reopen secrets after interface lock',async page=>{
+  await page.evaluate(()=>window.__fixture.delays.get_entry=true);await page.locator('[data-entry]').click();await page.waitForFunction(()=>!!window.__fixture.pending.get_entry);
+  assert.equal(await page.locator('#lock').isDisabled(),false);await page.locator('#lock').click();await page.locator('#lock-status').filter({hasText:'插件仍可使用'}).waitFor();
+  await page.evaluate(()=>window.__release('get_entry'));await ready(page);assert.equal(await page.locator('.shell,dialog,#entry-password').count(),0);assert.equal((await page.content()).includes(fixtureEntry.password),false);assert.equal(await page.evaluate(()=>window.__fixture.locked),false);
+  await unlock(page);assert.equal(await page.locator('dialog').count(),0);assert.equal((await page.content()).includes(fixtureEntry.password),false);
+ });
+ await check('full lock stays available during pending unlock and rejects its late response',async page=>{
+  await page.evaluate(()=>window.__fixture.delays.unlock_vault=true);await page.locator('#master-password').fill('correct-fixture-password');await page.locator('#gate-form button').click();await page.waitForFunction(()=>!!window.__fixture.pending.unlock_vault);
+  assert.equal(await page.locator('#fully-lock').isDisabled(),false);await page.locator('#fully-lock').click();await page.locator('#lock-status').filter({hasText:'插件暂不可用'}).waitFor();
+  await page.evaluate(()=>{window.__fixture.delays.unlock_vault=false;window.__release('unlock_vault');});await ready(page);await tick(page);
+  assert.equal(await page.locator('.shell,dialog,[data-entry]').count(),0);assert.equal(await page.locator('#master-password').inputValue(),'');assert.equal((await page.content()).includes(fixtureEntry.username),false);assert.equal((await page.content()).includes(fixtureEntry.password),false);
+  assert.deepEqual(await page.evaluate(()=>({vault:window.__fixture.locked,interface:window.__fixture.interfaceLocked})),{vault:true,interface:true});assert.match(await page.locator('#lock-status').innerText(),/插件暂不可用/);await unlock(page);
+ },{interfaceLocked:true});
+ await check('a queued unlock entering the backend handler after full lock cannot reopen the browser',async page=>{
+  await page.evaluate(()=>window.__fixture.delaysBefore.unlock_vault=true);await page.locator('#master-password').fill('correct-fixture-password');await page.locator('#gate-form button').click();await page.waitForFunction(()=>!!window.__fixture.pendingBefore.unlock_vault);
+  assert.equal(await page.evaluate(()=>window.__fixture.calls.find(c=>c.name==='unlock_vault').expectedGeneration),0,'Authentication must use the generation shown before the request was queued.');
+  await page.locator('#fully-lock').click();await page.locator('#lock-status').filter({hasText:'插件暂不可用'}).waitFor();assert.equal(await page.evaluate(()=>window.__fixture.sessionGeneration),1);
+  await page.evaluate(()=>{window.__fixture.delaysBefore.unlock_vault=false;window.__releaseBefore('unlock_vault');});await ready(page);
+  assert.deepEqual(await page.evaluate(()=>window.__fixture.rejected),[{name:'unlock_vault',expectedGeneration:0,actualGeneration:1}]);
+  const backend=await page.evaluate(()=>window.__TAURI_INTERNALS__.invoke('app_status'));assert.equal(backend.vault.locked,true);assert.equal(backend.interface_locked,true);assert.equal(backend.browser_available,false);assert.equal(await page.locator('.shell,dialog,[data-entry]').count(),0);assert.match(await page.locator('#lock-status').innerText(),/插件暂不可用/);
+  await unlock(page);assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='unlock_vault').at(-1).expectedGeneration),1,'A fresh unlock must use the updated generation.');
+ },{locked:true});
+ await check('a queued save entering the backend handler after full lock cannot change the vault',async page=>{
+  await page.locator('[data-entry]').click();await page.locator('#entry-password').fill('must-not-be-saved');await page.evaluate(()=>window.__fixture.delaysBefore.save_entry=true);await page.locator('#entry-form [type=submit]').click();await page.waitForFunction(()=>!!window.__fixture.pendingBefore.save_entry);
+  assert.equal(await page.evaluate(()=>window.__fixture.calls.find(c=>c.name==='save_entry').expectedGeneration),0);
+  await page.evaluate(()=>window.__lock());await page.locator('#lock-status').filter({hasText:'插件暂不可用'}).waitFor();await page.evaluate(()=>{window.__fixture.delaysBefore.save_entry=false;window.__releaseBefore('save_entry');});await ready(page);
+  assert.deepEqual(await page.evaluate(()=>window.__fixture.rejected),[{name:'save_entry',expectedGeneration:0,actualGeneration:1}]);assert.equal(await page.evaluate(()=>window.__fixture.entries[0].password),fixtureEntry.password);assert.equal(await page.evaluate(()=>window.__fixture.locked),true);assert.equal(await page.locator('.shell,dialog,#entry-password').count(),0);assert.equal((await page.content()).includes('must-not-be-saved'),false);
+  await unlock(page);await page.locator('[data-entry]').click();assert.equal(await page.locator('#entry-password').inputValue(),fixtureEntry.password);assert.equal(await page.evaluate(()=>window.__fixture.calls.filter(c=>c.name==='get_entry').at(-1).expectedGeneration),1);
+ });
  await check('account visibility is opt-in and preserves search across tabs',async page=>{
   const toggle=page.getByRole('switch',{name:'账号明文显示'});
   assert.equal(await toggle.isChecked(),false);assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);
@@ -142,12 +206,12 @@ try{
   assert.equal(await page.locator('#client-form,.secret-box,input,textarea').count(),0);
   assert.equal(await page.evaluate(()=>window.__fixture.calls.some(c=>['list_clients','create_client','revoke_client'].includes(c.name))),false);
  });
- await check('locking clears open password and secret controls',async page=>{
+ await check('mobile background full-lock event clears open password and secret controls',async page=>{
   await page.getByRole('switch',{name:'账号明文显示'}).check();
   await page.locator('[data-entry]').click();await page.locator('#entry-password').waitFor();await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();
-  assert.equal((await page.content()).includes(fixtureEntry.password),false);assert.equal(await page.locator('dialog').count(),0);await unlock(page);assert.equal(await page.locator('dialog').count(),0);
+  await page.locator('#lock-status').filter({hasText:'插件暂不可用'}).waitFor();assert.equal((await page.content()).includes(fixtureEntry.password),false);assert.equal(await page.locator('dialog').count(),0);assert.equal(await page.evaluate(()=>window.__fixture.locked),true);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await shot(page,'mobile-background-locked',{fullPage:false});await unlock(page);assert.equal(await page.locator('dialog').count(),0);
   assert.equal(await page.getByRole('switch',{name:'账号明文显示'}).isChecked(),false);assert.equal((await page.locator('.entries').innerHTML()).includes(fixtureEntry.username),false);
- });
+ },{mobile:true});
  await check('late password reply cannot restore dialog after lock',async page=>{
   await page.evaluate(()=>window.__fixture.delays.get_entry=true);await page.locator('[data-entry]').click();await page.waitForFunction(()=>!!window.__fixture.pending.get_entry);
   await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();await page.evaluate(()=>window.__release('get_entry'));await ready(page);await unlock(page);
@@ -200,7 +264,7 @@ try{
   await page.locator('[data-tab=devices]').click();assert.match(await page.locator('#lan-scan-count').innerText(),/已检测 20 \/ 253 个地址/);
   await page.evaluate(()=>window.__fixture.delays.app_status=true);await page.clock.runFor(1100);await page.waitForFunction(()=>!!window.__fixture.pending.app_status);
   await page.evaluate(()=>window.__lock());await page.locator('#gate-form').waitFor();await page.evaluate(()=>{window.__fixture.delays.app_status=false;window.__release('app_status');});await page.clock.runFor(1100);
-  assert.equal(await page.locator('#lan-scan-progress,.local-addresses').count(),0);assert.equal(await page.getByText('正在检测局域网设备…',{exact:true}).count(),0);assert.equal(await page.locator('.app-version').innerText(),'版本 0.2.4');
+  assert.equal(await page.locator('#lan-scan-progress,.local-addresses').count(),0);assert.equal(await page.getByText('正在检测局域网设备…',{exact:true}).count(),0);assert.equal(await page.locator('.app-version').innerText(),'版本 0.2.5');
   await page.evaluate(()=>window.__fixture.localAddresses=['10.0.0.8']);await unlock(page);assert.deepEqual(await page.locator('.local-address').allTextContents(),['10.0.0.8']);
  });
  await check('LAN scan reports actual limited ranges, failures and zero targets without false success',async page=>{
@@ -214,7 +278,7 @@ try{
  },{scanRanges:['192.168.100.0/24'],scanLimited:true});
  await check('peer versions distinguish compatible unknown clients from read-only legacy devices',async page=>{
   await page.locator('[data-tab=devices]').click();assert.deepEqual(await page.locator('[data-merge-device]').evaluateAll(buttons=>buttons.map(button=>button.dataset.mergeDevice).sort()),['peer-1','unknown-version-peer']);
-  assert.equal(await page.locator('.app-version').innerText(),'版本 0.2.4');assert.match(await page.locator('#version-compatibility').innerText(),/0\.2\.3、0\.2\.4/);assert.match(await page.locator('#version-compatibility').innerText(),/0\.2\.2.*不兼容/);
+  assert.equal(await page.locator('.app-version').innerText(),'版本 0.2.5');assert.match(await page.locator('#version-compatibility').innerText(),/0\.2\.3.*0\.2\.4.*0\.2\.5/);assert.match(await page.locator('#version-compatibility').innerText(),/0\.2\.2.*不兼容/);
   assert.match(await page.locator('[data-peer-id="peer-1"] .peer-version').innerText(),/版本 0\.2\.4/);
   const unknown=await page.locator('[data-peer-id="unknown-version-peer"] .peer-version').innerText();assert.match(unknown,/版本未提供.*支持单向接收/);assert.doesNotMatch(unknown,/0\.2\.3/,'A compatible older client without version metadata must not be assigned a guessed version.');
   assert.match(await page.locator('#incompatible-devices').innerText(),/旧版测试手机/);assert.match(await page.locator('[data-incompatible-peer-id="legacy-peer"]').innerText(),/具体版本未知.*需更新/);
@@ -286,6 +350,7 @@ try{
  },{mobile:true,discovered:[peer],merges:[incoming],localAddresses:['192.168.100.200','10.10.10.10','172.18.0.4'],scanRanges:['192.168.100.0/24','10.10.10.0/24','172.18.0.0/24'],scanTotal:759});
  await check('local vault remains available when networking failed',async page=>{
   assert.equal(await page.locator('[data-entry]').count(),1);await page.locator('[data-tab=devices]').click();await page.getByText('端口被其他程序占用',{exact:true}).waitFor();assert.equal(await page.locator('[data-action=detect]').isDisabled(),true);assert.equal(await page.locator('#lan-scan-progress').isVisible(),false);assert.deepEqual(await page.locator('.local-address').allTextContents(),['192.168.1.10']);await page.locator('[data-tab=vault]').click();await shot(page,'desktop-vault');
+  await page.locator('#lock').click();await page.locator('#lock-status').filter({hasText:'界面已锁定 · 插件暂不可用'}).waitFor();assert.equal(await page.evaluate(()=>window.__fixture.locked),false);assert.match(await page.locator('#gate-hint').innerText(),/服务|失败|不可用/);assert.doesNotMatch(await page.locator('#lock-status').innerText(),/密码库已锁定/);
  },{serviceError:true});
  console.log(`${passed} desktop/mobile UI scenarios passed`);
 }finally{await browser?.close();server.kill('SIGTERM');}

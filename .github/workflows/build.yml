@@ -141,6 +141,9 @@ jobs:
       - run: npm ci
       - name: Build native desktop and installer
         run: npm run tauri --workspace @ohmypassword/desktop -- build --ci --target "$BUILD_TARGET" --bundles "${{ matrix.bundle }}" -- --locked
+      - name: Test native interface lock and browser session
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked --manifest-path desktop/src-tauri/Cargo.toml --target "$BUILD_TARGET" --lib session::tests
       - name: Verify macOS DMG, complete signature and installed startup
         if: runner.os == 'macOS'
         run: python .github/scripts/verify-macos-bundle.py --target "$BUILD_TARGET"
