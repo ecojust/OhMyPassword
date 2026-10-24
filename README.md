@@ -22,17 +22,17 @@
 
 ## 测试包与大小
 
-安装包与插件见 [GitHub Release v0.2.2](https://github.com/ecojust/OhMyPassword/releases/tag/v0.2.2)，附统一 SHA256 校验文件。下表来自已通过全部检查的实际构建产物，详细验证范围见 [验证记录](VALIDATION.md)。
+安装包与插件见 [GitHub Release v0.2.3](https://github.com/ecojust/OhMyPassword/releases/tag/v0.2.3)，附统一 SHA256 校验文件。下表来自已通过全部检查的实际构建产物，详细验证范围见 [验证记录](VALIDATION.md)。
 
 | 产物 | 平台 | 实际文件大小 |
 | --- | --- | ---: |
 | 浏览器插件 ZIP | Chrome / Edge | 69.2 KiB |
-| 桌面安装器 | Windows x64 | 1.82 MiB |
-| 桌面便携 EXE | Windows x64 | 5.12 MiB |
-| 桌面 DMG | macOS ARM64 | 2.34 MiB |
-| 桌面 DEB | Linux x64 | 2.69 MiB |
-| 开发 APK，Rust 代码已优化 | Android ARM64 | 14.43 MiB |
-| 模拟器 App ZIP | iOS ARM64 Simulator | 19.91 MiB |
+| 桌面安装器 | Windows x64 | 1.83 MiB |
+| 桌面便携 EXE | Windows x64 | 5.15 MiB |
+| 桌面 DMG | macOS ARM64 | 2.35 MiB |
+| 桌面 DEB | Linux x64 | 2.70 MiB |
+| 开发 APK，Rust 代码已优化 | Android ARM64 | 14.48 MiB |
+| 模拟器 App ZIP | iOS ARM64 Simulator | 19.96 MiB |
 
 大小按实际下载文件统计。桌面使用系统 WebView：Windows 需要 WebView2，Linux 需要 GTK / WebKitGTK，macOS 使用系统 WebKit；上述体积不包含系统运行时。移动包均供开发测试，Android 使用开发签名，iOS 模拟器包不能直接安装到 iPhone。插件 ZIP 解压后按 [插件说明](extension/README.md) 加载。
 
@@ -49,7 +49,7 @@
 
 从 0.1.0 升级时请同时更新客户端和插件。原有加密密码库继续使用；插件会清理旧连接令牌，新流程不使用旧邀请码或长期自动同步权限。0.2.3 的局域网发现与接收使用协议 3，拒绝旧版双向协议；两台客户端都需升级才能互相接收。本机浏览器接口仍使用协议 2，不受这次局域网协议变更影响。
 
-**Android 升级限制：** 0.2.2 的开发 APK 与 0.2.1、0.2.0、0.1.0 的签名证书不同，不能直接覆盖安装。不要通过卸载旧应用来升级尚未迁出的唯一密码库：卸载会删除应用数据，且 Android 系统备份已禁用。请保留旧应用和数据，先确认密码已完整保存到其他可访问设备或完成可恢复的备份。桌面端的旧密码库读取已通过实际升级验证。
+**Android 升级限制：** 0.2.3 的开发 APK 与 0.2.2、0.2.1、0.2.0、0.1.0 的签名证书不同，不能直接覆盖安装。不要通过卸载旧应用来升级尚未迁出的唯一密码库：卸载会删除应用数据，且 Android 系统备份已禁用。请保留旧应用和数据，先确认密码已完整保存到其他可访问设备或完成可恢复的备份。桌面端的旧密码库读取已通过实际升级验证。
 
 浏览器插件不自动提交登录表单，不静默收集所有网站的密码，也不把密码库保存在浏览器存储中。首版没有移动系统自动填充扩展；手机其他 App 的自动填充需后续接入 Android Autofill / iOS Credential Provider。
 
