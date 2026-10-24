@@ -88,9 +88,9 @@ to a draft Release. It also checks the uploaded asset inventory and any SHA256
 digests returned by GitHub. Existing releases with the same tag are left intact.
 
 ```sh
-gh workflow run release.yml --ref master -f tag=v0.2.0
+gh workflow run release.yml --ref master -f tag=v0.2.1
 # After verifying the prepared draft and its assets:
-gh release edit v0.2.0 --repo ecojust/OhMyPassword --draft=false --latest
+gh release edit v0.2.1 --repo ecojust/OhMyPassword --draft=false --latest
 ```
 
 This workflow packages existing verified binaries; it does not rebuild the

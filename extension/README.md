@@ -1,6 +1,6 @@
 # OhMyPassword 浏览器扩展
 
-Chrome / Edge 的 Manifest V3 扩展，用于连接**当前电脑**上已解锁的 OhMyPassword 客户端。按当前网站的精确 hostname 查找账号，点击后填充主页面的登录表单，也可明确确认后保存或修改账号。密码更新保留原记录 ID，先保存到本机；其他设备通过客户端中的手动合并取得修改。
+Chrome / Edge 的 Manifest V3 扩展，用于连接**当前电脑**上已解锁的 OhMyPassword 客户端。按当前网站的可注册主域名查找账号，点击后填充主页面的登录表单，也可明确确认后保存或修改账号。密码更新保留原记录 ID，先保存到本机；其他设备通过客户端中的手动合并取得修改。
 
 ## 构建与安装
 
@@ -34,13 +34,21 @@ Origin 检查限制浏览器来源，**不能验证本机原生进程的身份**
 
 - `example.com` 与 `login.example.com` 分别匹配，不自动跨子域共用密码。
 - 凭据查询统一使用 `POST /v1/credentials/search`，JSON 请求体为 `{ "hostname": "example.com" }`；hostname 不放进 URL。连接、查询和保存由浏览器自身发送 Origin，不携带 Authorization 或连接令牌。
-- 自动填充要求 HTTPS，避免将同 hostname 的密码填入可被网络篡改的 HTTP 页面；仅本机回环地址作为开发例外。HTTP 网站仍可管理记录，需切到 HTTPS 后填充。
+- 自动填充要求 HTTPS，避免将同主域名的密码填入可被网络篡改的 HTTP 页面；仅本机回环地址作为开发例外。HTTP 网站仍可管理记录，需切到 HTTPS 后填充。
 - 只在用户点击后向主框架填充；不填 iframe，不填标注为 `new-password` 的注册密码框。出现多个登录密码框时停止，避免填错表单。
 - 注入前再次校验页面的 hostname、origin 和标签 ID，跳转后要求重新打开扩展。
 - 本机密码库锁定或客户端未运行时，扩展不会返回缓存密码。每次填充前重新读取当前记录。
 - 只保存本地端口，不将账号密码放入浏览器持久存储。使用后可以在客户端锁定密码库。
 - 仅申请 `activeTab`、`scripting`、`storage` 与回环地址访问权限，没有全站后台访问权限。
 - 网页与扩展 UI 都是原生 JavaScript/CSS，不包含前端框架、远程脚本或分析统计。
+
+## 主域名匹配
+
+`login.example.com`、`www.example.com` 与 `example.com` 共用匹配范围；`co.uk` 等多级后缀会按正确的可注册主域分组。内置 PSL 的 PRIVATE 规则将不同托管租户隔离，例如 `alice.github.io` 与 `bob.github.io` 不匹配。IP、localhost、未知后缀和公共后缀本身仍精确匹配。
+
+列表显示账号原保存网站；修改子域账号保留原 hostname 和 ID，新账号保存当前完整 hostname。页面跳转检查仍精确比较 origin、hostname 和标签 ID，即使跳转到同主域的另一个子域也要重新选择账号。客户端和插件均需更新到 0.2.1。
+
+域名解析及规则随插件一起打包，运行时不请求第三方服务；打包只包含用到的解析代码和数据，依赖许可附于 `THIRD-PARTY-LICENSES.txt`。
 
 ## 验证
 
